@@ -18,11 +18,20 @@ jobs:
       - name: Start Fossology
         run: |
           docker run -d --name fossy -p 8081:80 fossology/fossology
-          sleep 60   # give DB + services time to start
+          sleep 60   # wait for DB + services
 
-      - name: Upload file to Fossology (Basic Auth)
+      - name: Login and save session cookie
         run: |
-          curl -v -u fossy:fossy \
+          curl -v -c cookies.txt -X POST \
+               -F "username=fossy" \
+               -F "password=fossy" \
+               http://localhost:8081/repo/api/v1/login
+          echo "---- Cookie file ----"
+          cat cookies.txt
+
+      - name: Upload file using session cookie
+        run: |
+          curl -v -b cookies.txt \
                -F "fileInput=@input.tar.gz" \
-               "http://localhost:8081/repo/api/v1/uploads" > upload.json
+               http://localhost:8081/repo/api/v1/uploads > upload.json
           cat upload.json
