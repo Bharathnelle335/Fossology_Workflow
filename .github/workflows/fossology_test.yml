@@ -10,9 +10,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Package repo safely
+      - name: Create dummy file and tar
         run: |
-          tar --exclude='.git' -czf input.tar.gz *
+          echo "hello fossology" > test.txt
+          tar -czf input.tar.gz test.txt
 
       - name: Start Fossology
         run: |
