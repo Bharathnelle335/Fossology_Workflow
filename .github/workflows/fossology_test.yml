@@ -117,7 +117,7 @@ jobs:
       # ----------------------------------
       # Upload to Fossology
       # ----------------------------------
-            - name: Upload to Fossology
+      - name: Upload to Fossology
         run: |
           if [ "${{ github.event.inputs.scan_type }}" = "docker" ]; then
             FILE_TO_UPLOAD="docker-image.tar"
