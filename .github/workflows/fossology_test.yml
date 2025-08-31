@@ -93,10 +93,15 @@ jobs:
           EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
 
           AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
-            -u fossy:fossy \
             -H "accept: application/json" \
             -H "Content-Type: application/json" \
-            -d "{\"expires_at\":\"$EXPIRY\"}")
+            -d "{
+              \"username\": \"fossy\",
+              \"password\": \"fossy\",
+              \"token_name\": \"github-actions\",
+              \"token_scope\": \"write\",
+              \"token_expire\": \"$EXPIRY\"
+            }")
 
           echo "Auth Response: $AUTH_RESP"
 
