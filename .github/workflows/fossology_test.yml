@@ -111,8 +111,17 @@ jobs:
             exit 1
           fi
 
-          echo "FOSSOLOGY_TOKEN=$TOKEN" >> $GITHUB_ENV
+          # Save token WITH Bearer prefix
+          echo "FOSSOLOGY_TOKEN=Bearer $TOKEN" >> $GITHUB_ENV
           echo "✅ Token acquired, valid until $EXPIRY"
+
+      # ----------------------------
+      # Debug Token
+      # ----------------------------
+      - name: Debug Token
+        run: |
+          echo "Token length: ${#FOSSOLOGY_TOKEN}"
+          echo "Token prefix: ${FOSSOLOGY_TOKEN:0:20}..."
 
       # ----------------------------
       # Upload to Fossology
@@ -139,7 +148,7 @@ jobs:
             -H "applyGlobal: false" \
             -H "ignoreScm: false" \
             -H "uploadType: file" \
-            -H "Authorization: Bearer $FOSSOLOGY_TOKEN" \
+            -H "Authorization: $FOSSOLOGY_TOKEN" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
 
           echo "Upload Response: $UPLOAD_RESP"
@@ -170,6 +179,6 @@ jobs:
 
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
-            -H "Authorization: Bearer $FOSSOLOGY_TOKEN")
+            -H "Authorization: $FOSSOLOGY_TOKEN")
 
           echo "Job Response: $JOB_RESP"
