@@ -1,0 +1,26 @@
+name: Fossology Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-fossology:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Package small repo
+        run: tar -czf input.tar.gz .
+
+      - name: Start Fossology
+        run: |
+          docker run -d --name fossy -p 8081:80 fossology/fossology
+          sleep 60   # give DB + services time to start
+
+      - name: Upload file to Fossology (Basic Auth)
+        run: |
+          curl -v -u fossy:fossy \
+               -F "fileInput=@input.tar.gz" \
+               "http://localhost:8081/repo/api/v1/uploads" > upload.json
+          cat upload.json
