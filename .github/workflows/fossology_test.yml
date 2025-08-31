@@ -10,8 +10,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Package small repo
-        run: tar -czf input.tar.gz .
+      - name: Package repo safely
+        run: |
+          tar --exclude='.git' -czf input.tar.gz *
 
       - name: Start Fossology
         run: |
