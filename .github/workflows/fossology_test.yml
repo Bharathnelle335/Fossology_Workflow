@@ -1,88 +1,57 @@
-name: Fossology Scan
+name: test-fossology
 
 on:
   workflow_dispatch:
-    inputs:
-      agents:
-        description: "Select FOSSology agents"
-        type: choice
-        required: true
-        default: "nomos,copyright,email"
-        options:
-          - "nomos"
-          - "nomos,copyright"
-          - "nomos,copyright,email"
-          - "nomos,monk,license"
-          - "all"
 
 jobs:
   fossology-scan:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Package repo (or dummy if empty)
-        run: |
-          echo "📦 Creating tarball..."
-          if [ -z "$(ls -A | grep -v .git)" ]; then
-            echo "⚠️ Repo empty, creating dummy test file"
-            echo "hello fossology" > test.txt
-            tar -czf input.tar.gz test.txt
-          else
-            tar --exclude='.git' -czf input.tar.gz *
-          fi
+      - name: Create dummy file
+        run: echo "hello fossology" > dummy.txt
 
-      - name: Start Fossology container
+      - name: Start Fossology
         run: |
-          docker run -d --name fossy -p 8081:80 fossology/fossology:3.11.0
-          echo "⏳ Waiting for Fossology to start..."
-          sleep 90
+          docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
+          sleep 60
 
       - name: Upload file to Fossology
         run: |
-          echo "🔑 Using token starts with: $(echo ${{ secrets.FOSSOLOGY_TOKEN }} | cut -c1-15)..."
-          UPLOAD_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
-            -F "fileInput=@input.tar.gz" \
-            http://localhost:8081/repo/api/v1/uploads)
-
-          echo "📥 Upload response: $UPLOAD_RESP"
-
-          UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.upload.id')
-
-          if [ "$UPLOAD_ID" = "null" ] || [ -z "$UPLOAD_ID" ]; then
-            echo "❌ Upload failed: no upload.id returned"
-            exit 1
-          fi
-
-          echo "✅ Upload succeeded with ID: $UPLOAD_ID"
+          UPLOAD_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/uploads" \
+            -H "accept: application/json" \
+            -H "folderId: 1" \
+            -H "public: public" \
+            -H "applyGlobal: false" \
+            -H "ignoreScm: false" \
+            -H "uploadType: file" \
+            -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
+            -H "Content-Type: multipart/form-data" \
+            -F "fileInput=@dummy.txt;type=text/plain")
+          echo "Upload Response: $UPLOAD_RESP"
+          UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
 
-
-      - name: Trigger scan with selected agents
+      - name: Trigger Fossology jobs
         run: |
-          echo "Triggering agents: ${{ github.event.inputs.agents }}"
-          JOB_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" -X POST \
-            "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=${{ github.event.inputs.agents }}")
-          echo "$JOB_RESP"
-          JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
+          JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=nomos,copyright,email" \
+            -H "accept: application/json" \
+            -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}")
+          echo "Job Response: $JOB_RESP"
+          JOB_ID=$(echo "$JOB_RESP" | jq -r '.message')
           echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
 
-      - name: Wait for scan to complete
+      - name: Wait for job to finish
         run: |
-          echo "⏳ Waiting for job $JOB_ID..."
           for i in {1..30}; do
-            STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
-              "http://localhost:8081/repo/api/v1/jobs/${JOB_ID}" | jq -r '.status')
+            STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/${JOB_ID}" \
+              -H "accept: application/json" \
+              -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" | jq -r '.status')
             echo "Status: $STATUS"
-            if [ "$STATUS" = "Completed" ]; then
-              exit 0
-            fi
-            if [ "$STATUS" = "Failed" ]; then
-              echo "❌ Job failed"
-              exit 1
-            fi
+            if [ "$STATUS" = "Completed" ]; then exit 0; fi
+            if [ "$STATUS" = "Failed" ]; then exit 1; fi
             sleep 20
           done
           echo "❌ Job did not finish in time"
@@ -90,17 +59,8 @@ jobs:
 
       - name: Download SPDX report
         run: |
-          REPORT_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" -X POST \
-            "http://localhost:8081/repo/api/v1/report?uploadId=${UPLOAD_ID}&reportFormat=spdx2")
-          echo "$REPORT_RESP"
-          REPORT_ID=$(echo "$REPORT_RESP" | jq -r '.fileId')
-          echo "REPORT_ID=$REPORT_ID" >> $GITHUB_ENV
-
-          curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
-            "http://localhost:8081/repo/api/v1/report/${REPORT_ID}" -o fossology-report.spdx
-
-      - name: Upload SPDX report as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fossology-spdx-report
-          path: fossology-report.spdx
+          curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=${UPLOAD_ID}&reportFormat=spdx2" \
+            -H "accept: application/json" \
+            -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
+            -o fossology_report.spdx.json
+          cat fossology_report.spdx.json
