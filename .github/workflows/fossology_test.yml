@@ -1,37 +1,83 @@
-name: Fossology Test
+name: Fossology Scan
 
 on:
   workflow_dispatch:
+    inputs:
+      scan_agents:
+        description: "Comma-separated list of FOSSology agents (e.g. nomos,copyright,email)"
+        required: true
+        default: "nomos,copyright,email"
 
 jobs:
-  test-fossology:
+  fossology-scan:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Create dummy file and tar
+      - name: Package repo
         run: |
-          echo "hello fossology" > test.txt
-          tar -czf input.tar.gz test.txt
+          echo "📦 Creating tarball..."
+          tar --exclude='.git' -czf input.tar.gz *
 
-      - name: Start Fossology
+      - name: Start Fossology container
         run: |
-          docker run -d --name fossy -p 8081:80 fossology/fossology
-          sleep 60   # wait for DB + services
+          docker run -d --name fossy -p 8081:80 fossology/fossology:3.11.0
+          echo "⏳ Waiting for Fossology to start..."
+          sleep 90
 
-      - name: Login and save session cookie
+      - name: Upload file to Fossology
         run: |
-          curl -v -c cookies.txt -X POST \
-               -F "username=fossy" \
-               -F "password=fossy" \
-               http://localhost:8081/repo/api/v1/login
-          echo "---- Cookie file ----"
-          cat cookies.txt
+          UPLOAD_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
+            -F "fileInput=@input.tar.gz" \
+            "http://localhost:8081/repo/api/v1/uploads")
+          echo "$UPLOAD_RESP"
+          UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.upload.id')
+          echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
 
-      - name: Upload file using session cookie
+      - name: Trigger scan with selected agents
         run: |
-          curl -v -b cookies.txt \
-               -F "fileInput=@input.tar.gz" \
-               http://localhost:8081/repo/api/v1/uploads > upload.json
-          cat upload.json
+          echo "Triggering agents: ${{ github.event.inputs.scan_agents }}"
+          JOB_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" -X POST \
+            "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=${{ github.event.inputs.scan_agents }}")
+          echo "$JOB_RESP"
+          JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
+          echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
+
+      - name: Wait for scan to complete
+        run: |
+          echo "⏳ Waiting for job $JOB_ID..."
+          for i in {1..30}; do
+            STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
+              "http://localhost:8081/repo/api/v1/jobs/${JOB_ID}" | jq -r '.status')
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "Completed" ]; then
+              exit 0
+            fi
+            if [ "$STATUS" = "Failed" ]; then
+              echo "❌ Job failed"
+              exit 1
+            fi
+            sleep 20
+          done
+          echo "❌ Job did not finish in time"
+          exit 1
+
+      - name: Download CSV report
+        run: |
+          REPORT_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" -X POST \
+            "http://localhost:8081/repo/api/v1/report?uploadId=${UPLOAD_ID}&reportFormat=spdx2")
+          echo "$REPORT_RESP"
+          REPORT_ID=$(echo "$REPORT_RESP" | jq -r '.fileId')
+          echo "REPORT_ID=$REPORT_ID" >> $GITHUB_ENV
+
+          # Download the actual report
+          curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
+            "http://localhost:8081/repo/api/v1/report/${REPORT_ID}" -o fossology-report.spdx
+
+      - name: Upload SPDX report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fossology-spdx-report
+          path: fossology-report.spdx
