@@ -42,12 +42,23 @@ jobs:
 
       - name: Upload file to Fossology
         run: |
+          echo "🔑 Using token starts with: $(echo ${{ secrets.FOSSOLOGY_TOKEN }} | cut -c1-15)..."
           UPLOAD_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
             -F "fileInput=@input.tar.gz" \
             http://localhost:8081/repo/api/v1/uploads)
-          echo "$UPLOAD_RESP"
+
+          echo "📥 Upload response: $UPLOAD_RESP"
+
           UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.upload.id')
+
+          if [ "$UPLOAD_ID" = "null" ] || [ -z "$UPLOAD_ID" ]; then
+            echo "❌ Upload failed: no upload.id returned"
+            exit 1
+          fi
+
+          echo "✅ Upload succeeded with ID: $UPLOAD_ID"
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
+
 
       - name: Trigger scan with selected agents
         run: |
