@@ -3,10 +3,17 @@ name: Fossology Scan
 on:
   workflow_dispatch:
     inputs:
-      scan_agents:
-        description: "Comma-separated list of FOSSology agents (e.g. nomos,copyright,email)"
+      agents:
+        description: "Select FOSSology agents"
+        type: choice
         required: true
         default: "nomos,copyright,email"
+        options:
+          - "nomos"
+          - "nomos,copyright"
+          - "nomos,copyright,email"
+          - "nomos,monk,license"
+          - "all"
 
 jobs:
   fossology-scan:
@@ -16,10 +23,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Package repo
+      - name: Package repo (or dummy if empty)
         run: |
           echo "📦 Creating tarball..."
-          tar --exclude='.git' -czf input.tar.gz *
+          if [ -z "$(ls -A | grep -v .git)" ]; then
+            echo "⚠️ Repo empty, creating dummy test file"
+            echo "hello fossology" > test.txt
+            tar -czf input.tar.gz test.txt
+          else
+            tar --exclude='.git' -czf input.tar.gz *
+          fi
 
       - name: Start Fossology container
         run: |
@@ -31,16 +44,16 @@ jobs:
         run: |
           UPLOAD_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
             -F "fileInput=@input.tar.gz" \
-            "http://localhost:8081/repo/api/v1/uploads")
+            http://localhost:8081/repo/api/v1/uploads)
           echo "$UPLOAD_RESP"
           UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.upload.id')
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
 
       - name: Trigger scan with selected agents
         run: |
-          echo "Triggering agents: ${{ github.event.inputs.scan_agents }}"
+          echo "Triggering agents: ${{ github.event.inputs.agents }}"
           JOB_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" -X POST \
-            "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=${{ github.event.inputs.scan_agents }}")
+            "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=${{ github.event.inputs.agents }}")
           echo "$JOB_RESP"
           JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
           echo "JOB_ID=$JOB_ID" >> $GITHUB_ENV
@@ -64,7 +77,7 @@ jobs:
           echo "❌ Job did not finish in time"
           exit 1
 
-      - name: Download CSV report
+      - name: Download SPDX report
         run: |
           REPORT_RESP=$(curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" -X POST \
             "http://localhost:8081/repo/api/v1/report?uploadId=${UPLOAD_ID}&reportFormat=spdx2")
@@ -72,7 +85,6 @@ jobs:
           REPORT_ID=$(echo "$REPORT_RESP" | jq -r '.fileId')
           echo "REPORT_ID=$REPORT_ID" >> $GITHUB_ENV
 
-          # Download the actual report
           curl -s -H "Authorization: Bearer ${{ secrets.FOSSOLOGY_TOKEN }}" \
             "http://localhost:8081/repo/api/v1/report/${REPORT_ID}" -o fossology-report.spdx
 
