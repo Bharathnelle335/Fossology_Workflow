@@ -1,4 +1,4 @@
-name: Fossology Scan
+name: Fossology Test
 
 on:
   workflow_dispatch:
@@ -23,66 +23,76 @@ on:
         required: false
       agents_nomos:
         description: "Run Nomos license scanner"
+        required: false
+        default: "true"
         type: boolean
-        default: true
       agents_monk:
         description: "Run Monk license scanner"
+        required: false
+        default: "false"
         type: boolean
-        default: false
       agents_copyright:
         description: "Run Copyright detector"
+        required: false
+        default: "true"
         type: boolean
-        default: true
       agents_email:
         description: "Run Email detector"
+        required: false
+        default: "false"
         type: boolean
-        default: false
       agents_keyword:
         description: "Run Keyword detector"
+        required: false
+        default: "false"
         type: boolean
-        default: false
 
 jobs:
   fossology:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Run Fossology container
-        run: |
-          echo "🐳 Starting Fossology..."
-          docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
-          sleep 60
-
-      - name: Generate Fossology API Token
-        run: |
-          TOKEN=$(docker exec fossy php /usr/local/lib/fossology/cli/createToken.php fossy fossy --token | tail -n1)
-          echo "FOSSOLOGY_TOKEN=$TOKEN" >> $GITHUB_ENV
-          echo "🔑 Token generated for fossy user"
-
-      # ----------------- Prepare Inputs -----------------
-      - name: Save Docker image
+      - name: Setup Docker image for scan
         if: github.event.inputs.scan_type == 'docker'
         run: |
-          echo "📦 Pulling Docker image: ${{ github.event.inputs.docker_image }}"
+          echo "📦 Pulling image: ${{ github.event.inputs.docker_image }}"
           docker pull ${{ github.event.inputs.docker_image }}
           docker save ${{ github.event.inputs.docker_image }} -o docker-image.tar
           ls -lh docker-image.tar
 
-      - name: Create repo input
+      - name: Create dummy repo file
         if: github.event.inputs.scan_type == 'repo'
         run: |
           echo "Repo URL: ${{ github.event.inputs.repo_url }}" > repo.txt
-          ls -lh repo.txt
 
-      - name: Create file input
+      - name: Create dummy file input
         if: github.event.inputs.scan_type == 'file'
         run: |
           echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
-          ls -lh file.txt
 
-      # ----------------- Upload -----------------
+      - name: Run Fossology container
+        run: |
+          docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
+          echo "⏳ Waiting for Fossology to start..."
+          sleep 60
+
+      - name: Authenticate and get API token
+        run: |
+          AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
+            -H "accept: application/json" \
+            -u fossy:fossy)
+          echo "Auth Response: $AUTH_RESP"
+          TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization')
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "❌ Failed to get token"
+            exit 1
+          fi
+          echo "FOSSOLOGY_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "✅ Token acquired"
+
       - name: Upload to Fossology
         run: |
           if [ "${{ github.event.inputs.scan_type }}" = "docker" ]; then
@@ -110,10 +120,13 @@ jobs:
 
           echo "Upload Response: $UPLOAD_RESP"
           UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
+          if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
+            echo "❌ Upload failed"
+            exit 1
+          fi
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
-      # ----------------- Trigger Agents -----------------
       - name: Trigger Fossology Agents
         run: |
           AGENTS=""
