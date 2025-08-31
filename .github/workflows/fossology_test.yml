@@ -1,4 +1,4 @@
-name: Fossology Test
+name: Fossology Scan
 
 on:
   workflow_dispatch:
@@ -21,41 +21,42 @@ on:
       file_path:
         description: "Path to file (for file scans)"
         required: false
+      token_days:
+        description: "Token validity in days (1-30)"
+        required: true
+        default: "7"
       agents_nomos:
         description: "Run Nomos license scanner"
-        required: false
         default: "true"
         type: boolean
       agents_monk:
         description: "Run Monk license scanner"
-        required: false
         default: "false"
         type: boolean
       agents_copyright:
         description: "Run Copyright detector"
-        required: false
         default: "true"
         type: boolean
       agents_email:
         description: "Run Email detector"
-        required: false
         default: "false"
         type: boolean
       agents_keyword:
         description: "Run Keyword detector"
-        required: false
         default: "false"
         type: boolean
 
 jobs:
   fossology:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Docker image for scan
+      # ----------------------------------
+      # Prepare inputs into files
+      # ----------------------------------
+      - name: Setup Docker image
         if: github.event.inputs.scan_type == 'docker'
         run: |
           echo "📦 Pulling image: ${{ github.event.inputs.docker_image }}"
@@ -63,36 +64,54 @@ jobs:
           docker save ${{ github.event.inputs.docker_image }} -o docker-image.tar
           ls -lh docker-image.tar
 
-      - name: Create dummy repo file
+      - name: Create dummy file for repo
         if: github.event.inputs.scan_type == 'repo'
         run: |
           echo "Repo URL: ${{ github.event.inputs.repo_url }}" > repo.txt
+          ls -lh repo.txt
 
-      - name: Create dummy file input
+      - name: Create dummy file for file
         if: github.event.inputs.scan_type == 'file'
         run: |
           echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
+          ls -lh file.txt
 
+      # ----------------------------------
+      # Start Fossology in container
+      # ----------------------------------
       - name: Run Fossology container
         run: |
           docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
           echo "⏳ Waiting for Fossology to start..."
           sleep 60
 
+      # ----------------------------------
+      # Generate token
+      # ----------------------------------
       - name: Authenticate and get API token
         run: |
+          EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
+
           AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
+            -u fossy:fossy \
             -H "accept: application/json" \
-            -u fossy:fossy)
+            -H "Content-Type: application/json" \
+            -d "{\"expires_at\":\"$EXPIRY\"}")
+
           echo "Auth Response: $AUTH_RESP"
+
           TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization')
           if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
             echo "❌ Failed to get token"
             exit 1
           fi
-          echo "FOSSOLOGY_TOKEN=$TOKEN" >> $GITHUB_ENV
-          echo "✅ Token acquired"
 
+          echo "FOSSOLOGY_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "✅ Token acquired, valid until $EXPIRY"
+
+      # ----------------------------------
+      # Upload to Fossology
+      # ----------------------------------
       - name: Upload to Fossology
         run: |
           if [ "${{ github.event.inputs.scan_type }}" = "docker" ]; then
@@ -120,13 +139,18 @@ jobs:
 
           echo "Upload Response: $UPLOAD_RESP"
           UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
+
           if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
             echo "❌ Upload failed"
             exit 1
           fi
+
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
+      # ----------------------------------
+      # Trigger agents
+      # ----------------------------------
       - name: Trigger Fossology Agents
         run: |
           AGENTS=""
