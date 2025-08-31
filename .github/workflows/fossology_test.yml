@@ -53,9 +53,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ----------------------------------
+      # ----------------------------
       # Prepare inputs into files
-      # ----------------------------------
+      # ----------------------------
       - name: Setup Docker image
         if: github.event.inputs.scan_type == 'docker'
         run: |
@@ -76,18 +76,18 @@ jobs:
           echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
           ls -lh file.txt
 
-      # ----------------------------------
-      # Start Fossology in container
-      # ----------------------------------
+      # ----------------------------
+      # Start Fossology container
+      # ----------------------------
       - name: Run Fossology container
         run: |
           docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
           echo "⏳ Waiting for Fossology to start..."
           sleep 60
 
-      # ----------------------------------
-      # Generate token
-      # ----------------------------------
+      # ----------------------------
+      # Generate API token
+      # ----------------------------
       - name: Authenticate and get API token
         run: |
           EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
@@ -114,9 +114,9 @@ jobs:
           echo "FOSSOLOGY_TOKEN=$TOKEN" >> $GITHUB_ENV
           echo "✅ Token acquired, valid until $EXPIRY"
 
-      # ----------------------------------
+      # ----------------------------
       # Upload to Fossology
-      # ----------------------------------
+      # ----------------------------
       - name: Upload to Fossology
         run: |
           if [ "${{ github.event.inputs.scan_type }}" = "docker" ]; then
@@ -153,27 +153,9 @@ jobs:
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
-      - name: Trigger Fossology Agents
-        run: |
-          AGENTS=""
-          if [ "${{ github.event.inputs.agents_nomos }}" = "true" ]; then AGENTS="$AGENTS,nomos"; fi
-          if [ "${{ github.event.inputs.agents_monk }}" = "true" ]; then AGENTS="$AGENTS,monk"; fi
-          if [ "${{ github.event.inputs.agents_copyright }}" = "true" ]; then AGENTS="$AGENTS,copyright"; fi
-          if [ "${{ github.event.inputs.agents_email }}" = "true" ]; then AGENTS="$AGENTS,email"; fi
-          if [ "${{ github.event.inputs.agents_keyword }}" = "true" ]; then AGENTS="$AGENTS,keyword"; fi
-          AGENTS=$(echo "$AGENTS" | sed 's/^,//')
-
-          echo "🔍 Running agents: $AGENTS"
-
-          JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
-            -H "accept: application/json" \
-            -H "Authorization: Bearer $FOSSOLOGY_TOKEN")
-
-          echo "Job Response: $JOB_RESP"
-
-      # ----------------------------------
-      # Trigger agents
-      # ----------------------------------
+      # ----------------------------
+      # Trigger Agents
+      # ----------------------------
       - name: Trigger Fossology Agents
         run: |
           AGENTS=""
