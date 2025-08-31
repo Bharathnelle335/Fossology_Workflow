@@ -1,4 +1,4 @@
-name: Fossology Scan
+name: Fossology Test
 
 on:
   workflow_dispatch:
