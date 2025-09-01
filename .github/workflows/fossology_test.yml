@@ -10,16 +10,12 @@ on:
         type: choice
         options: [docker, repo, file]
       docker_image:
-        description: "Docker image name (e.g., nginx:1.25)"
         required: false
       repo_url:
-        description: "Git repo URL (for repo scans)"
         required: false
       file_path:
-        description: "Path to file (for file scans)"
         required: false
       token_days:
-        description: "Token validity in days (1-30)"
         required: true
         default: "7"
       agents_nomos:
@@ -49,7 +45,6 @@ jobs:
         run: |
           case "${{ github.event.inputs.scan_type }}" in
             docker)
-              echo "📦 Pulling image: ${{ github.event.inputs.docker_image }}"
               docker pull ${{ github.event.inputs.docker_image }}
               docker save ${{ github.event.inputs.docker_image }} -o docker-image.tar
               FILE_TO_UPLOAD="docker-image.tar"
@@ -71,7 +66,6 @@ jobs:
 
       - name: Run Fossology scan and fetch results
         run: |
-          # Start container
           docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
           echo "⏳ Waiting for Fossology to start..."
           sleep 60
@@ -94,11 +88,14 @@ jobs:
             exit 1
           fi
           TOKEN="Bearer $TOKEN"
+          SAFE_TOKEN_PREVIEW="$(echo "$TOKEN" | sed -E 's/^Bearer ([A-Za-z0-9_-]{0,5}).*([A-Za-z0-9_-]{5})$/Bearer \1...<hidden>...\2/')"
           echo "✅ Token acquired, valid until $EXPIRY"
+          echo "🔑 Token preview: $SAFE_TOKEN_PREVIEW"
 
           # Upload file
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
-          UPLOAD_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/uploads" \
+          echo "🔑 Using token: $SAFE_TOKEN_PREVIEW"
+          UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8081/repo/api/v1/uploads" \
             -H "accept: application/json" \
             -H "folderId: 1" \
             -H "public: public" \
@@ -107,11 +104,17 @@ jobs:
             -H "uploadType: file" \
             -H "Authorization: $TOKEN" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
-          UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
-          if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
-            echo "❌ Upload failed"
+
+          HTTP_BODY=$(echo "$UPLOAD_RESP" | head -n -1)
+          HTTP_STATUS=$(echo "$UPLOAD_RESP" | tail -n 1)
+
+          if [ "$HTTP_STATUS" -ne 201 ]; then
+            echo "❌ Upload failed with status $HTTP_STATUS"
+            echo "Response: $HTTP_BODY"
             exit 1
           fi
+
+          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
           # Build agent list
@@ -125,6 +128,7 @@ jobs:
 
           # Trigger agents
           echo "🔍 Running agents: $AGENTS"
+          echo "🔑 Using token: $SAFE_TOKEN_PREVIEW"
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
             -H "Authorization: $TOKEN")
@@ -153,8 +157,9 @@ jobs:
             sleep 10
           done
 
-          # Fetch results (Nomos license report as example)
-          echo "📄 Fetching license report..."
+          # Fetch SPDX report
+          echo "📄 Fetching SPDX license report..."
+          echo "🔑 Using token: $SAFE_TOKEN_PREVIEW"
           REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
             -H "accept: text/plain" \
             -H "Authorization: $TOKEN")
