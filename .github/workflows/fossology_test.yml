@@ -129,11 +129,10 @@ jobs:
             exit 1
           fi
 
-          # ✅ FIX: extract numeric uploadId
-          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.id // .uploadId // empty')
+          # ✅ Correct extraction for uploadId
+          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
           if ! [[ "$UPLOAD_ID" =~ ^[0-9]+$ ]]; then
-            echo "❌ ERROR: Upload ID is not a valid integer. Response was:"
-            echo "$HTTP_BODY"
+            echo "❌ ERROR: Upload ID is not a valid integer. Response was: $HTTP_BODY"
             exit 1
           fi
           echo "✅ Uploaded with ID: $UPLOAD_ID"
@@ -154,11 +153,10 @@ jobs:
             -H "accept: application/json" \
             -H "Authorization: $AUTH_HEADER")
 
-          # ✅ FIX: extract numeric jobId
-          JOB_ID=$(echo "$JOB_RESP" | jq -r '.id // empty')
+          # ✅ Correct extraction for jobId
+          JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
           if ! [[ "$JOB_ID" =~ ^[0-9]+$ ]]; then
-            echo "❌ ERROR: Job ID is not a valid integer. Response was:"
-            echo "$JOB_RESP"
+            echo "❌ ERROR: Job ID is not a valid integer. Response was: $JOB_RESP"
             exit 1
           fi
           echo "✅ Job started with ID: $JOB_ID"
