@@ -131,7 +131,7 @@ jobs:
             MIME_TYPE="text/plain"
           fi
 
-          TOKEN=$(tr -d '\r\n' < fossology_token.raw)
+          TOKEN="Bearer $(tr -d '\r\n' < fossology_token.raw)"
 
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
 
@@ -142,7 +142,7 @@ jobs:
             -H "applyGlobal: false" \
             -H "ignoreScm: false" \
             -H "uploadType: file" \
-            -H "Authorization: Bearer $TOKEN" \
+            -H "Authorization: $TOKEN" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
 
           echo "Upload Response: $UPLOAD_RESP"
@@ -161,7 +161,7 @@ jobs:
       # ----------------------------
       - name: Trigger Fossology Agents
         run: |
-          TOKEN=$(tr -d '\r\n' < fossology_token.raw)
+          TOKEN="Bearer $(tr -d '\r\n' < fossology_token.raw)"
           UPLOAD_ID=$(tr -d '\r\n' < fossology_upload_id.txt)
 
           AGENTS=""
@@ -176,6 +176,6 @@ jobs:
 
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
-            -H "Authorization: Bearer $TOKEN")
+            -H "Authorization: $TOKEN")
 
           echo "Job Response: $JOB_RESP"
