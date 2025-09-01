@@ -146,10 +146,11 @@ jobs:
           [ "${{ github.event.inputs.agents_keyword }}" = "true" ] && AGENTS="$AGENTS,keyword"
           AGENTS="${AGENTS#,}"
 
-          # ===== Trigger agents =====
+          # ===== Trigger agents (with folderId) =====
           echo "🔍 Running agents: $AGENTS"
           AUTH_HEADER=$(assemble_token)
-          JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
+          JOB_RESP=$(curl -s -X POST \
+            "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&folderId=1&agents=$AGENTS" \
             -H "accept: application/json" \
             -H "Authorization: $AUTH_HEADER")
 
