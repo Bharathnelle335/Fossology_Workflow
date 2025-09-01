@@ -1,4 +1,4 @@
-name: Fossology Test (Token Split + Bearer Fix)
+name: Fossology Test (Token Split + Bearer Fix + Folder Poll)
 
 on:
   workflow_dispatch:
@@ -136,17 +136,24 @@ jobs:
           fi
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
-          # ===== Get actual folder ID from upload info =====
-          UPLOAD_INFO=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
-            -H "accept: application/json" \
-            -H "Authorization: $AUTH_HEADER")
-          REAL_FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid')
+          # ===== Wait for folder ID to be ready =====
+          echo "⏳ Waiting for upload $UPLOAD_ID to be ready..."
+          while true; do
+            AUTH_HEADER=$(assemble_token)
+            UPLOAD_INFO=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER")
 
-          if ! [[ "$REAL_FOLDER_ID" =~ ^[0-9]+$ ]]; then
-            echo "❌ ERROR: Could not determine folder ID. Response was: $UPLOAD_INFO"
-            exit 1
-          fi
-          echo "📂 Using folder ID: $REAL_FOLDER_ID"
+            FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid // empty')
+            if [[ "$FOLDER_ID" =~ ^[0-9]+$ ]]; then
+              echo "📂 Using folder ID: $FOLDER_ID"
+              break
+            fi
+
+            MSG=$(echo "$UPLOAD_INFO" | jq -r '.message // empty')
+            echo "   Still processing: $MSG"
+            sleep 2
+          done
 
           # ===== Build analysis JSON =====
           ANALYSIS_JSON=$(jq -n \
@@ -159,11 +166,11 @@ jobs:
 
           echo "🔍 Running agents: $ANALYSIS_JSON"
 
-          # ===== Trigger agents (per Fossology spec) =====
+          # ===== Trigger agents =====
           AUTH_HEADER=$(assemble_token)
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
             -H "accept: application/json" \
-            -H "folderId: $REAL_FOLDER_ID" \
+            -H "folderId: $FOLDER_ID" \
             -H "uploadId: $UPLOAD_ID" \
             -H "Content-Type: application/json" \
             -H "Authorization: $AUTH_HEADER" \
@@ -196,13 +203,4 @@ jobs:
           done
 
           # ===== Fetch SPDX report =====
-          echo "📄 Fetching SPDX license report..."
-          AUTH_HEADER=$(assemble_token)
-          REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
-            -H "accept: text/plain" \
-            -H "Authorization: $AUTH_HEADER")
-          echo "===== SPDX License Report ====="
-          echo "$REPORT"
-
-          # ===== Cleanup =====
-          rm -rf token_parts
+          echo "
