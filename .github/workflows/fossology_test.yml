@@ -1,4 +1,4 @@
-name: Fossology Test (Token Split)
+name: Fossology Test (Token Split Fix)
 
 on:
   workflow_dispatch:
@@ -90,11 +90,11 @@ jobs:
             exit 1
           fi
 
-          # ===== Split token into files to avoid masking =====
+          # ===== Split token into files without newlines =====
           mkdir token_parts
-          echo "${RAW_TOKEN:0:60}" > token_parts/part1.txt
-          echo "${RAW_TOKEN:60:60}" > token_parts/part2.txt
-          echo "${RAW_TOKEN:120}" > token_parts/part3.txt
+          printf "%s" "${RAW_TOKEN:0:60}" > token_parts/part1.txt
+          printf "%s" "${RAW_TOKEN:60:60}" > token_parts/part2.txt
+          printf "%s" "${RAW_TOKEN:120}" > token_parts/part3.txt
 
           echo "✅ Token acquired, valid until $EXPIRY"
           for f in token_parts/part*.txt; do
@@ -114,6 +114,7 @@ jobs:
           # ===== Upload file =====
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
           AUTH_HEADER=$(assemble_token)
+          echo "Auth header SHA256: $(echo -n "$AUTH_HEADER" | sha256sum | cut -d' ' -f1)"
           UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8081/repo/api/v1/uploads" \
             -H "accept: application/json" \
             -H "folderId: 1" \
