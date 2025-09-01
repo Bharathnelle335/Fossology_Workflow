@@ -86,7 +86,7 @@ jobs:
           sleep 60
 
       # ----------------------------
-      # Generate API token (save to file)
+      # Generate API token
       # ----------------------------
       - name: Authenticate and get API token
         run: |
@@ -111,18 +111,9 @@ jobs:
             exit 1
           fi
 
-          # Save token with Bearer prefix in a file
-          echo "Bearer $TOKEN" > fossology_token.txt
-          echo "✅ Token acquired and stored in fossology_token.txt (valid until $EXPIRY)"
-
-      # ----------------------------
-      # Debug Token (just to check length/prefix)
-      # ----------------------------
-      - name: Debug Token
-        run: |
-          TOKEN=$(cat fossology_token.txt)
-          echo "Token length: ${#TOKEN}"
-          echo "Token prefix: ${TOKEN:0:20}..."
+          # Save raw token to file
+          printf "%s" "$TOKEN" > fossology_token.raw
+          echo "✅ Token acquired, valid until $EXPIRY"
 
       # ----------------------------
       # Upload to Fossology
@@ -140,7 +131,7 @@ jobs:
             MIME_TYPE="text/plain"
           fi
 
-          TOKEN=$(cat fossology_token.txt)
+          TOKEN=$(tr -d '\r\n' < fossology_token.raw)
 
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
 
@@ -151,7 +142,7 @@ jobs:
             -H "applyGlobal: false" \
             -H "ignoreScm: false" \
             -H "uploadType: file" \
-            -H "Authorization: $TOKEN" \
+            -H "Authorization: Bearer $TOKEN" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
 
           echo "Upload Response: $UPLOAD_RESP"
@@ -162,7 +153,7 @@ jobs:
             exit 1
           fi
 
-          echo "$UPLOAD_ID" > fossology_upload_id.txt
+          printf "%s" "$UPLOAD_ID" > fossology_upload_id.txt
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
       # ----------------------------
@@ -170,8 +161,8 @@ jobs:
       # ----------------------------
       - name: Trigger Fossology Agents
         run: |
-          TOKEN=$(cat fossology_token.txt)
-          UPLOAD_ID=$(cat fossology_upload_id.txt)
+          TOKEN=$(tr -d '\r\n' < fossology_token.raw)
+          UPLOAD_ID=$(tr -d '\r\n' < fossology_upload_id.txt)
 
           AGENTS=""
           if [ "${{ github.event.inputs.agents_nomos }}" = "true" ]; then AGENTS="$AGENTS,nomos"; fi
@@ -185,6 +176,6 @@ jobs:
 
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
-            -H "Authorization: $TOKEN")
+            -H "Authorization: Bearer $TOKEN")
 
           echo "Job Response: $JOB_RESP"
