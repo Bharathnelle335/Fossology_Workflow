@@ -83,17 +83,13 @@ jobs:
               \"token_expire\": \"$EXPIRY\"
             }")
 
-          # Strip Bearer if present, trim whitespace/newlines
-          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //')
-          RAW_TOKEN=$(echo "$RAW_TOKEN" | tr -d '\r\n[:space:]')
-
+          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //' | tr -d '\r\n[:space:]')
           if [ -z "$RAW_TOKEN" ] || [ "$RAW_TOKEN" = "null" ]; then
             echo "❌ Failed to get token"
             echo "Response: $AUTH_RESP"
             exit 1
           fi
 
-          # ===== Split token into files without newlines =====
           mkdir token_parts
           printf "%s" "${RAW_TOKEN:0:60}" > token_parts/part1.txt
           printf "%s" "${RAW_TOKEN:60:60}" > token_parts/part2.txt
@@ -133,7 +129,13 @@ jobs:
             exit 1
           fi
 
-          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
+          # ✅ FIX: extract numeric uploadId
+          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.id // .uploadId // empty')
+          if ! [[ "$UPLOAD_ID" =~ ^[0-9]+$ ]]; then
+            echo "❌ ERROR: Upload ID is not a valid integer. Response was:"
+            echo "$HTTP_BODY"
+            exit 1
+          fi
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
           # ===== Build agent list =====
@@ -151,9 +153,12 @@ jobs:
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
             -H "Authorization: $AUTH_HEADER")
-          JOB_ID=$(echo "$JOB_RESP" | jq -r '.message')
-          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
-            echo "❌ Failed to start job"
+
+          # ✅ FIX: extract numeric jobId
+          JOB_ID=$(echo "$JOB_RESP" | jq -r '.id // empty')
+          if ! [[ "$JOB_ID" =~ ^[0-9]+$ ]]; then
+            echo "❌ ERROR: Job ID is not a valid integer. Response was:"
+            echo "$JOB_RESP"
             exit 1
           fi
           echo "✅ Job started with ID: $JOB_ID"
