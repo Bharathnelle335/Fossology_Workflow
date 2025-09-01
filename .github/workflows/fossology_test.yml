@@ -8,10 +8,7 @@ on:
         required: true
         default: "docker"
         type: choice
-        options:
-          - docker
-          - repo
-          - file
+        options: [docker, repo, file]
       docker_image:
         description: "Docker image name (e.g., nginx:1.25)"
         required: false
@@ -26,23 +23,18 @@ on:
         required: true
         default: "7"
       agents_nomos:
-        description: "Run Nomos license scanner"
         default: "true"
         type: boolean
       agents_monk:
-        description: "Run Monk license scanner"
         default: "false"
         type: boolean
       agents_copyright:
-        description: "Run Copyright detector"
         default: "true"
         type: boolean
       agents_email:
-        description: "Run Email detector"
         default: "false"
         type: boolean
       agents_keyword:
-        description: "Run Keyword detector"
         default: "false"
         type: boolean
 
@@ -53,45 +45,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ----------------------------
-      # Prepare inputs into files
-      # ----------------------------
-      - name: Setup Docker image
-        if: github.event.inputs.scan_type == 'docker'
+      - name: Prepare input file
         run: |
-          echo "📦 Pulling image: ${{ github.event.inputs.docker_image }}"
-          docker pull ${{ github.event.inputs.docker_image }}
-          docker save ${{ github.event.inputs.docker_image }} -o docker-image.tar
-          ls -lh docker-image.tar
+          case "${{ github.event.inputs.scan_type }}" in
+            docker)
+              echo "📦 Pulling image: ${{ github.event.inputs.docker_image }}"
+              docker pull ${{ github.event.inputs.docker_image }}
+              docker save ${{ github.event.inputs.docker_image }} -o docker-image.tar
+              FILE_TO_UPLOAD="docker-image.tar"
+              MIME_TYPE="application/x-tar"
+              ;;
+            repo)
+              echo "Repo URL: ${{ github.event.inputs.repo_url }}" > repo.txt
+              FILE_TO_UPLOAD="repo.txt"
+              MIME_TYPE="text/plain"
+              ;;
+            file)
+              echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
+              FILE_TO_UPLOAD="file.txt"
+              MIME_TYPE="text/plain"
+              ;;
+          esac
+          echo "FILE_TO_UPLOAD=$FILE_TO_UPLOAD" >> $GITHUB_ENV
+          echo "MIME_TYPE=$MIME_TYPE" >> $GITHUB_ENV
 
-      - name: Create dummy file for repo
-        if: github.event.inputs.scan_type == 'repo'
+      - name: Run Fossology scan and fetch results
         run: |
-          echo "Repo URL: ${{ github.event.inputs.repo_url }}" > repo.txt
-          ls -lh repo.txt
-
-      - name: Create dummy file for file
-        if: github.event.inputs.scan_type == 'file'
-        run: |
-          echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
-          ls -lh file.txt
-
-      # ----------------------------
-      # Start Fossology container
-      # ----------------------------
-      - name: Run Fossology container
-        run: |
+          # Start container
           docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
           echo "⏳ Waiting for Fossology to start..."
           sleep 60
 
-      # ----------------------------
-      # Generate API token
-      # ----------------------------
-      - name: Authenticate and get API token
-        run: |
+          # Generate token
           EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
-
           AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
             -H "accept: application/json" \
             -H "Content-Type: application/json" \
@@ -102,39 +88,16 @@ jobs:
               \"token_scope\": \"write\",
               \"token_expire\": \"$EXPIRY\"
             }")
-
-          echo "Auth Response: $AUTH_RESP"
-
           TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization')
           if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
             echo "❌ Failed to get token"
             exit 1
           fi
-
-          # Save raw token to file
-          printf "%s" "$TOKEN" > fossology_token.raw
+          TOKEN="Bearer $TOKEN"
           echo "✅ Token acquired, valid until $EXPIRY"
 
-      # ----------------------------
-      # Upload to Fossology
-      # ----------------------------
-      - name: Upload to Fossology
-        run: |
-          if [ "${{ github.event.inputs.scan_type }}" = "docker" ]; then
-            FILE_TO_UPLOAD="docker-image.tar"
-            MIME_TYPE="application/x-tar"
-          elif [ "${{ github.event.inputs.scan_type }}" = "repo" ]; then
-            FILE_TO_UPLOAD="repo.txt"
-            MIME_TYPE="text/plain"
-          else
-            FILE_TO_UPLOAD="file.txt"
-            MIME_TYPE="text/plain"
-          fi
-
-          TOKEN="Bearer $(< fossology_token.raw)"  # ✅ Properly read token from file
-
+          # Upload file
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
-
           UPLOAD_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/uploads" \
             -H "accept: application/json" \
             -H "folderId: 1" \
@@ -144,38 +107,56 @@ jobs:
             -H "uploadType: file" \
             -H "Authorization: $TOKEN" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
-
-          echo "Upload Response: $UPLOAD_RESP"
           UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
-
           if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
             echo "❌ Upload failed"
             exit 1
           fi
-
-          printf "%s" "$UPLOAD_ID" > fossology_upload_id.txt
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
-      # ----------------------------
-      # Trigger Agents
-      # ----------------------------
-      - name: Trigger Fossology Agents
-        run: |
-          TOKEN="Bearer $(< fossology_token.raw)"  # ✅ Properly read token from file
-          UPLOAD_ID=$(< fossology_upload_id.txt)
-
+          # Build agent list
           AGENTS=""
-          if [ "${{ github.event.inputs.agents_nomos }}" = "true" ]; then AGENTS="$AGENTS,nomos"; fi
-          if [ "${{ github.event.inputs.agents_monk }}" = "true" ]; then AGENTS="$AGENTS,monk"; fi
-          if [ "${{ github.event.inputs.agents_copyright }}" = "true" ]; then AGENTS="$AGENTS,copyright"; fi
-          if [ "${{ github.event.inputs.agents_email }}" = "true" ]; then AGENTS="$AGENTS,email"; fi
-          if [ "${{ github.event.inputs.agents_keyword }}" = "true" ]; then AGENTS="$AGENTS,keyword"; fi
-          AGENTS=$(echo "$AGENTS" | sed 's/^,//')
+          [ "${{ github.event.inputs.agents_nomos }}" = "true" ] && AGENTS="$AGENTS,nomos"
+          [ "${{ github.event.inputs.agents_monk }}" = "true" ] && AGENTS="$AGENTS,monk"
+          [ "${{ github.event.inputs.agents_copyright }}" = "true" ] && AGENTS="$AGENTS,copyright"
+          [ "${{ github.event.inputs.agents_email }}" = "true" ] && AGENTS="$AGENTS,email"
+          [ "${{ github.event.inputs.agents_keyword }}" = "true" ] && AGENTS="$AGENTS,keyword"
+          AGENTS="${AGENTS#,}"
 
+          # Trigger agents
           echo "🔍 Running agents: $AGENTS"
-
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
             -H "Authorization: $TOKEN")
+          JOB_ID=$(echo "$JOB_RESP" | jq -r '.message')
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
+            echo "❌ Failed to start job"
+            exit 1
+          fi
+          echo "✅ Job started with ID: $JOB_ID"
 
-          echo "Job Response: $JOB_RESP"
+          # Wait for job completion
+          echo "⏳ Waiting for job to finish..."
+          while true; do
+            STATUS_RESP=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
+              -H "accept: application/json" \
+              -H "Authorization: $TOKEN")
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
+            echo "Job status: $STATUS"
+            if [ "$STATUS" = "Completed" ]; then
+              echo "✅ Job completed"
+              break
+            elif [ "$STATUS" = "Failed" ]; then
+              echo "❌ Job failed"
+              exit 1
+            fi
+            sleep 10
+          done
+
+          # Fetch results (Nomos license report as example)
+          echo "📄 Fetching license report..."
+          REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
+            -H "accept: text/plain" \
+            -H "Authorization: $TOKEN")
+          echo "===== SPDX License Report ====="
+          echo "$REPORT"
