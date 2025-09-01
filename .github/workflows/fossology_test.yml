@@ -129,7 +129,6 @@ jobs:
             exit 1
           fi
 
-          # ✅ Extract numeric uploadId
           UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
           if ! [[ "$UPLOAD_ID" =~ ^[0-9]+$ ]]; then
             echo "❌ ERROR: Upload ID is not a valid integer. Response was: $HTTP_BODY"
@@ -137,30 +136,28 @@ jobs:
           fi
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
-          # ===== Build agent list =====
-          AGENTS=""
-          [ "${{ github.event.inputs.agents_nomos }}" = "true" ] && AGENTS="$AGENTS,nomos"
-          [ "${{ github.event.inputs.agents_monk }}" = "true" ] && AGENTS="$AGENTS,monk"
-          [ "${{ github.event.inputs.agents_copyright }}" = "true" ] && AGENTS="$AGENTS,copyright"
-          [ "${{ github.event.inputs.agents_email }}" = "true" ] && AGENTS="$AGENTS,email"
-          [ "${{ github.event.inputs.agents_keyword }}" = "true" ] && AGENTS="$AGENTS,keyword"
-          AGENTS="${AGENTS#,}"
+          # ===== Build analysis JSON =====
+          ANALYSIS_JSON=$(jq -n \
+            --argjson nomos $([[ "${{ github.event.inputs.agents_nomos }}" == "true" ]] && echo true || echo false) \
+            --argjson monk $([[ "${{ github.event.inputs.agents_monk }}" == "true" ]] && echo true || echo false) \
+            --argjson copyright $([[ "${{ github.event.inputs.agents_copyright }}" == "true" ]] && echo true || echo false) \
+            --argjson email $([[ "${{ github.event.inputs.agents_email }}" == "true" ]] && echo true || echo false) \
+            --argjson keyword $([[ "${{ github.event.inputs.agents_keyword }}" == "true" ]] && echo true || echo false) \
+            '{nomos:$nomos, monk:$monk, copyright:$copyright, email:$email, keyword:$keyword}')
 
-          # ===== Trigger agents (JSON body as per Fossology spec) =====
-          echo "🔍 Running agents: $AGENTS"
+          echo "🔍 Running agents: $ANALYSIS_JSON"
+
+          # ===== Trigger agents (per Fossology spec) =====
           AUTH_HEADER=$(assemble_token)
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
             -H "accept: application/json" \
+            -H "folderId: 1" \
+            -H "uploadId: $UPLOAD_ID" \
             -H "Content-Type: application/json" \
             -H "Authorization: $AUTH_HEADER" \
-            -d "{
-              \"uploadId\": $UPLOAD_ID,
-              \"folderId\": 1,
-              \"agents\": \"$AGENTS\"
-            }")
+            -d "{\"analysis\": $ANALYSIS_JSON}")
 
-          # ✅ Extract numeric jobId
-          JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
+          JOB_ID=$(echo "$JOB_RESP" | jq -r '.message // .id')
           if ! [[ "$JOB_ID" =~ ^[0-9]+$ ]]; then
             echo "❌ ERROR: Job ID is not a valid integer. Response was: $JOB_RESP"
             exit 1
