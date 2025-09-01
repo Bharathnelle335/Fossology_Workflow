@@ -136,6 +136,18 @@ jobs:
           fi
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
+          # ===== Get actual folder ID from upload info =====
+          UPLOAD_INFO=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
+            -H "accept: application/json" \
+            -H "Authorization: $AUTH_HEADER")
+          REAL_FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid')
+
+          if ! [[ "$REAL_FOLDER_ID" =~ ^[0-9]+$ ]]; then
+            echo "❌ ERROR: Could not determine folder ID. Response was: $UPLOAD_INFO"
+            exit 1
+          fi
+          echo "📂 Using folder ID: $REAL_FOLDER_ID"
+
           # ===== Build analysis JSON =====
           ANALYSIS_JSON=$(jq -n \
             --argjson nomos $([[ "${{ github.event.inputs.agents_nomos }}" == "true" ]] && echo true || echo false) \
@@ -151,7 +163,7 @@ jobs:
           AUTH_HEADER=$(assemble_token)
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
             -H "accept: application/json" \
-            -H "folderId: 1" \
+            -H "folderId: $REAL_FOLDER_ID" \
             -H "uploadId: $UPLOAD_ID" \
             -H "Content-Type: application/json" \
             -H "Authorization: $AUTH_HEADER" \
