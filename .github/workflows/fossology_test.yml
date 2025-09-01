@@ -203,4 +203,14 @@ jobs:
           done
 
           # ===== Fetch SPDX report =====
-          echo "
+          echo "📄 Fetching SPDX license report..."
+          AUTH_HEADER=$(assemble_token)
+          REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
+          -H "accept: text/plain" \
+          -H "Authorization: $AUTH_HEADER")
+
+          echo "===== SPDX License Report ====="
+          echo "$REPORT"
+
+          # ===== Cleanup =====
+          rm -rf token_parts
