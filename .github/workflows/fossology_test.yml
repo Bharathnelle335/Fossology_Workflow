@@ -123,7 +123,7 @@ jobs:
           echo "Token length: ${#FOSSOLOGY_TOKEN}"
           echo "Token prefix: ${FOSSOLOGY_TOKEN:0:20}..."
 
-      # ----------------------------
+            # ----------------------------
       # Upload to Fossology
       # ----------------------------
       - name: Upload to Fossology
@@ -148,7 +148,7 @@ jobs:
             -H "applyGlobal: false" \
             -H "ignoreScm: false" \
             -H "uploadType: file" \
-            -H "Authorization: $FOSSOLOGY_TOKEN" \
+            -H "Authorization: ${FOSSOLOGY_TOKEN}" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
 
           echo "Upload Response: $UPLOAD_RESP"
@@ -179,6 +179,6 @@ jobs:
 
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
-            -H "Authorization: $FOSSOLOGY_TOKEN")
+            -H "Authorization: ${FOSSOLOGY_TOKEN}")
 
           echo "Job Response: $JOB_RESP"
