@@ -235,19 +235,17 @@ jobs:
           done
 
           # ===== Cleanup =====
-          echo "🧹 Cleaning up token fragments..."
+          echo "🧹 Cleaning up token fragments...."
           rm -rf token_parts
 
-            - name: Convert SPDX report to CSV (fallback to raw SPDX if invalid)
+      - name: Convert SPDX report to CSV (fallback to raw SPDX if invalid)
         run: |
           echo "File Name,License ID" > fossology_reports/report_spdx2.csv
           if jq -e '.files | type == "array"' fossology_reports/report_spdx2.json > /dev/null; then
             jq -r '.files[] | [.fileName] + ([.licenses[]?.shortName] // ["NO LICENSE"]) | @csv' \
               fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.csv
           else
-            echo "⚠️ SPDX report is invalid or missing .files[]. Skipping CSV generation." >&2
-            echo "File Name,License ID" > fossology_reports/report_spdx2.csv
-            echo "SPDX report could not be parsed. See JSON for details." >> fossology_reports/report_spdx2.csv
+            echo "\"SPDX report could not be parsed. See JSON for details.\",\"\"" >> fossology_reports/report_spdx2.csv
           fi
 
       - name: Upload SPDX JSON report
@@ -261,3 +259,5 @@ jobs:
         with:
           name: SPDX-CSV
           path: fossology_reports/report_spdx2.csv
+
+
