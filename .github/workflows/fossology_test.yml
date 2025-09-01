@@ -1,4 +1,4 @@
-name: Fossology Test (Token Split Fix)
+name: Fossology Test (Token Split + Bearer Fix)
 
 on:
   workflow_dispatch:
@@ -83,7 +83,10 @@ jobs:
               \"token_expire\": \"$EXPIRY\"
             }")
 
-          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | tr -d '\r\n')
+          # Strip Bearer if present, trim whitespace/newlines
+          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //')
+          RAW_TOKEN=$(echo "$RAW_TOKEN" | tr -d '\r\n[:space:]')
+
           if [ -z "$RAW_TOKEN" ] || [ "$RAW_TOKEN" = "null" ]; then
             echo "❌ Failed to get token"
             echo "Response: $AUTH_RESP"
@@ -104,11 +107,7 @@ jobs:
           done
 
           assemble_token() {
-            local p1 p2 p3
-            p1=$(<token_parts/part1.txt)
-            p2=$(<token_parts/part2.txt)
-            p3=$(<token_parts/part3.txt)
-            echo "Bearer ${p1}${p2}${p3}"
+            echo "Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
           }
 
           # ===== Upload file =====
