@@ -120,40 +120,40 @@ jobs:
       # ----------------------------
       - name: Upload to Fossology
         run: |
-          if [ "${{ github.event.inputs.scan_type }}" = "docker" ]; then
-            FILE_TO_UPLOAD="docker-image.tar"
-            MIME_TYPE="application/x-tar"
-          elif [ "${{ github.event.inputs.scan_type }}" = "repo" ]; then
-            FILE_TO_UPLOAD="repo.txt"
-            MIME_TYPE="text/plain"
+         if [ "${{ github.event.inputs.scan_type }}" = "docker" ]; then
+         FILE_TO_UPLOAD="docker-image.tar"
+         MIME_TYPE="application/x-tar"
+         elif [ "${{ github.event.inputs.scan_type }}" = "repo" ]; then
+         FILE_TO_UPLOAD="repo.txt"
+         MIME_TYPE="text/plain"
           else
-            FILE_TO_UPLOAD="file.txt"
-            MIME_TYPE="text/plain"
+         FILE_TO_UPLOAD="file.txt"
+         MIME_TYPE="text/plain"
           fi
 
           TOKEN="Bearer $(tr -d '\r\n' < fossology_token.raw)"
 
-          echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
+         echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
 
-          UPLOAD_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/uploads" \
-            -H "accept: application/json" \
-            -H "folderId: 1" \
-            -H "public: public" \
-            -H "applyGlobal: false" \
-            -H "ignoreScm: false" \
-            -H "uploadType: file" \
-            -H "Authorization: $TOKEN" \
-            -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
+         UPLOAD_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/uploads" \
+         -H "accept: application/json" \
+         -H "folderId: 1" \
+         -H "public: public" \
+         -H "applyGlobal: false" \
+         -H "ignoreScm: false" \
+         -H "uploadType: file" \
+         -H "Authorization: $TOKEN" \
+         -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
 
-          echo "Upload Response: $UPLOAD_RESP"
-          UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
+         echo "Upload Response: $UPLOAD_RESP"
+         UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
 
           if [ -z "$UPLOAD_ID" ] || [ "$UPLOAD_ID" = "null" ]; then
-            echo "❌ Upload failed"
-            exit 1
-          fi
+           echo "❌ Upload failed"
+         exit 1
+         fi
 
-          printf "%s" "$UPLOAD_ID" > fossology_upload_id.txt
+         printf "%s" "$UPLOAD_ID" > fossology_upload_id.txt
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
       # ----------------------------
