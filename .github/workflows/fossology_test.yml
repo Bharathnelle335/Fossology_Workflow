@@ -237,3 +237,25 @@ jobs:
           # ===== Cleanup =====
           echo "🧹 Cleaning up token fragments..."
           rm -rf token_parts
+
+      - name: Save SPDX report to file
+        run: |
+          echo "$REPORT" > fossology_reports/report_spdx2.json
+
+            - name: Convert SPDX report to CSV
+        run: |
+          echo "File Name,License ID" > fossology_reports/report_spdx2.csv
+          jq -r '.files[] | [.fileName] + ([.licenses[]?.shortName] // ["NO LICENSE"]) | @csv' \
+            fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.csv
+
+      - name: Upload SPDX JSON report
+        uses: actions/upload-artifact@v3
+        with:
+          name: SPDX-JSON
+          path: fossology_reports/report_spdx2.json
+
+      - name: Upload SPDX CSV report
+        uses: actions/upload-artifact@v3
+        with:
+          name: SPDX-CSV
+          path: fossology_reports/report_spdx2.csv
