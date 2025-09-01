@@ -131,7 +131,7 @@ jobs:
             MIME_TYPE="text/plain"
           fi
 
-          TOKEN="Bearer $(< fossology_token.raw)"
+          TOKEN="Bearer $(< fossology_token.raw)"  # ✅ Properly read token from file
 
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
 
@@ -161,7 +161,7 @@ jobs:
       # ----------------------------
       - name: Trigger Fossology Agents
         run: |
-          TOKEN="Bearer $(< fossology_token.raw)"
+          TOKEN="Bearer $(< fossology_token.raw)"  # ✅ Properly read token from file
           UPLOAD_ID=$(< fossology_upload_id.txt)
 
           AGENTS=""
