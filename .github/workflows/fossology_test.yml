@@ -1,4 +1,4 @@
-name: Fossology Test
+name: Fossology Test (Token Split)
 
 on:
   workflow_dispatch:
@@ -64,13 +64,13 @@ jobs:
           echo "FILE_TO_UPLOAD=$FILE_TO_UPLOAD" >> $GITHUB_ENV
           echo "MIME_TYPE=$MIME_TYPE" >> $GITHUB_ENV
 
-      - name: Run Fossology scan and fetch results
+      - name: Run Fossology scan and fetch results (Token Split)
         run: |
           docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
           echo "⏳ Waiting for Fossology to start..."
           sleep 60
 
-          # ===== Generate token directly from API =====
+          # ===== Generate token =====
           EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
           AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
             -H "accept: application/json" \
@@ -89,18 +89,31 @@ jobs:
             echo "Response: $AUTH_RESP"
             exit 1
           fi
-          TOKEN="Bearer $RAW_TOKEN"
 
-          # Safe debug info
+          # ===== Split token into files to avoid masking =====
+          mkdir token_parts
+          echo "${RAW_TOKEN:0:60}" > token_parts/part1.txt
+          echo "${RAW_TOKEN:60:60}" > token_parts/part2.txt
+          echo "${RAW_TOKEN:120}" > token_parts/part3.txt
+
           echo "✅ Token acquired, valid until $EXPIRY"
-          echo "ℹ️ Token length: ${#TOKEN}"
-          echo "ℹ️ Token starts with 'Bearer '? $( [[ "$TOKEN" == Bearer* ]] && echo yes || echo no )"
-          echo "ℹ️ Token SHA256: $(echo -n "$TOKEN" | sha256sum | cut -d' ' -f1)"
-          SAFE_TOKEN_PREVIEW="$(echo "$TOKEN" | sed -E 's/^Bearer ([A-Za-z0-9_-]{0,5}).*([A-Za-z0-9_-]{5})$/Bearer \1...<hidden>...\2/')"
-          echo "🔑 Token preview: $SAFE_TOKEN_PREVIEW"
+          for f in token_parts/part*.txt; do
+            LEN=$(wc -c < "$f" | tr -d ' ')
+            HASH=$(sha256sum "$f" | cut -d' ' -f1)
+            echo " - $(basename "$f"): length=$LEN, sha256=$HASH"
+          done
+
+          assemble_token() {
+            local p1 p2 p3
+            p1=$(<token_parts/part1.txt)
+            p2=$(<token_parts/part2.txt)
+            p3=$(<token_parts/part3.txt)
+            echo "Bearer ${p1}${p2}${p3}"
+          }
 
           # ===== Upload file =====
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
+          AUTH_HEADER=$(assemble_token)
           UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8081/repo/api/v1/uploads" \
             -H "accept: application/json" \
             -H "folderId: 1" \
@@ -108,7 +121,7 @@ jobs:
             -H "applyGlobal: false" \
             -H "ignoreScm: false" \
             -H "uploadType: file" \
-            -H "Authorization: $TOKEN" \
+            -H "Authorization: $AUTH_HEADER" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
 
           HTTP_BODY=$(echo "$UPLOAD_RESP" | head -n -1)
@@ -134,9 +147,10 @@ jobs:
 
           # ===== Trigger agents =====
           echo "🔍 Running agents: $AGENTS"
+          AUTH_HEADER=$(assemble_token)
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
-            -H "Authorization: $TOKEN")
+            -H "Authorization: $AUTH_HEADER")
           JOB_ID=$(echo "$JOB_RESP" | jq -r '.message')
           if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
             echo "❌ Failed to start job"
@@ -147,9 +161,10 @@ jobs:
           # ===== Wait for job completion =====
           echo "⏳ Waiting for job to finish..."
           while true; do
+            AUTH_HEADER=$(assemble_token)
             STATUS_RESP=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
               -H "accept: application/json" \
-              -H "Authorization: $TOKEN")
+              -H "Authorization: $AUTH_HEADER")
             STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
             echo "Job status: $STATUS"
             if [ "$STATUS" = "Completed" ]; then
@@ -164,8 +179,12 @@ jobs:
 
           # ===== Fetch SPDX report =====
           echo "📄 Fetching SPDX license report..."
+          AUTH_HEADER=$(assemble_token)
           REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
             -H "accept: text/plain" \
-            -H "Authorization: $TOKEN")
+            -H "Authorization: $AUTH_HEADER")
           echo "===== SPDX License Report ====="
           echo "$REPORT"
+
+          # ===== Cleanup =====
+          rm -rf token_parts
