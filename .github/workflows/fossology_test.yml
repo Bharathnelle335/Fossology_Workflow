@@ -129,7 +129,7 @@ jobs:
             exit 1
           fi
 
-          # ✅ Correct extraction for uploadId
+          # ✅ Extract numeric uploadId
           UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
           if ! [[ "$UPLOAD_ID" =~ ^[0-9]+$ ]]; then
             echo "❌ ERROR: Upload ID is not a valid integer. Response was: $HTTP_BODY"
@@ -146,15 +146,20 @@ jobs:
           [ "${{ github.event.inputs.agents_keyword }}" = "true" ] && AGENTS="$AGENTS,keyword"
           AGENTS="${AGENTS#,}"
 
-          # ===== Trigger agents (with folderId) =====
+          # ===== Trigger agents (JSON body as per Fossology spec) =====
           echo "🔍 Running agents: $AGENTS"
           AUTH_HEADER=$(assemble_token)
-          JOB_RESP=$(curl -s -X POST \
-            "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&folderId=1&agents=$AGENTS" \
+          JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
             -H "accept: application/json" \
-            -H "Authorization: $AUTH_HEADER")
+            -H "Content-Type: application/json" \
+            -H "Authorization: $AUTH_HEADER" \
+            -d "{
+              \"uploadId\": $UPLOAD_ID,
+              \"folderId\": 1,
+              \"agents\": \"$AGENTS\"
+            }")
 
-          # ✅ Correct extraction for jobId
+          # ✅ Extract numeric jobId
           JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
           if ! [[ "$JOB_ID" =~ ^[0-9]+$ ]]; then
             echo "❌ ERROR: Job ID is not a valid integer. Response was: $JOB_RESP"
