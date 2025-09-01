@@ -70,7 +70,7 @@ jobs:
           echo "⏳ Waiting for Fossology to start..."
           sleep 60
 
-          # Generate token
+          # ===== Generate token directly from API =====
           EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
           AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
             -H "accept: application/json" \
@@ -82,19 +82,25 @@ jobs:
               \"token_scope\": \"write\",
               \"token_expire\": \"$EXPIRY\"
             }")
-          TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization')
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+
+          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | tr -d '\r\n')
+          if [ -z "$RAW_TOKEN" ] || [ "$RAW_TOKEN" = "null" ]; then
             echo "❌ Failed to get token"
+            echo "Response: $AUTH_RESP"
             exit 1
           fi
-          TOKEN="Bearer $TOKEN"
-          SAFE_TOKEN_PREVIEW="$(echo "$TOKEN" | sed -E 's/^Bearer ([A-Za-z0-9_-]{0,5}).*([A-Za-z0-9_-]{5})$/Bearer \1...<hidden>...\2/')"
+          TOKEN="Bearer $RAW_TOKEN"
+
+          # Safe debug info
           echo "✅ Token acquired, valid until $EXPIRY"
+          echo "ℹ️ Token length: ${#TOKEN}"
+          echo "ℹ️ Token starts with 'Bearer '? $( [[ "$TOKEN" == Bearer* ]] && echo yes || echo no )"
+          echo "ℹ️ Token SHA256: $(echo -n "$TOKEN" | sha256sum | cut -d' ' -f1)"
+          SAFE_TOKEN_PREVIEW="$(echo "$TOKEN" | sed -E 's/^Bearer ([A-Za-z0-9_-]{0,5}).*([A-Za-z0-9_-]{5})$/Bearer \1...<hidden>...\2/')"
           echo "🔑 Token preview: $SAFE_TOKEN_PREVIEW"
 
-          # Upload file
+          # ===== Upload file =====
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
-          echo "🔑 Using token: $SAFE_TOKEN_PREVIEW"
           UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8081/repo/api/v1/uploads" \
             -H "accept: application/json" \
             -H "folderId: 1" \
@@ -117,7 +123,7 @@ jobs:
           UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
           echo "✅ Uploaded with ID: $UPLOAD_ID"
 
-          # Build agent list
+          # ===== Build agent list =====
           AGENTS=""
           [ "${{ github.event.inputs.agents_nomos }}" = "true" ] && AGENTS="$AGENTS,nomos"
           [ "${{ github.event.inputs.agents_monk }}" = "true" ] && AGENTS="$AGENTS,monk"
@@ -126,9 +132,8 @@ jobs:
           [ "${{ github.event.inputs.agents_keyword }}" = "true" ] && AGENTS="$AGENTS,keyword"
           AGENTS="${AGENTS#,}"
 
-          # Trigger agents
+          # ===== Trigger agents =====
           echo "🔍 Running agents: $AGENTS"
-          echo "🔑 Using token: $SAFE_TOKEN_PREVIEW"
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs?uploadId=$UPLOAD_ID&agents=$AGENTS" \
             -H "accept: application/json" \
             -H "Authorization: $TOKEN")
@@ -139,7 +144,7 @@ jobs:
           fi
           echo "✅ Job started with ID: $JOB_ID"
 
-          # Wait for job completion
+          # ===== Wait for job completion =====
           echo "⏳ Waiting for job to finish..."
           while true; do
             STATUS_RESP=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
@@ -157,9 +162,8 @@ jobs:
             sleep 10
           done
 
-          # Fetch SPDX report
+          # ===== Fetch SPDX report =====
           echo "📄 Fetching SPDX license report..."
-          echo "🔑 Using token: $SAFE_TOKEN_PREVIEW"
           REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
             -H "accept: text/plain" \
             -H "Authorization: $TOKEN")
