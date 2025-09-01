@@ -245,13 +245,13 @@ jobs:
             fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.csv
 
       - name: Upload SPDX JSON report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: SPDX-JSON
           path: fossology_reports/report_spdx2.json
 
       - name: Upload SPDX CSV report
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: SPDX-CSV
           path: fossology_reports/report_spdx2.csv
