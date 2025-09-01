@@ -57,6 +57,8 @@ jobs:
               ;;
             file)
               echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
+              echo "# SPDX-License-Identifier: MIT" >> file.txt
+              echo "# Copyright 2025 Bharath Technologies" >> file.txt
               FILE_TO_UPLOAD="file.txt"
               MIME_TYPE="text/plain"
               ;;
@@ -70,7 +72,6 @@ jobs:
           echo "⏳ Waiting for Fossology to start..."
           sleep 60
 
-          # ===== Generate token =====
           EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
           AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
             -H "accept: application/json" \
@@ -185,7 +186,7 @@ jobs:
 
           # ===== Wait for job completion =====
           echo "⏳ Waiting for job to finish..."
-          while true; do
+                    while true; do
             AUTH_HEADER=$(assemble_token)
             STATUS_RESP=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
               -H "accept: application/json" \
@@ -206,11 +207,33 @@ jobs:
           echo "📄 Fetching SPDX license report..."
           AUTH_HEADER=$(assemble_token)
           REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
-          -H "accept: text/plain" \
-          -H "Authorization: $AUTH_HEADER")
+            -H "accept: application/json" \
+            -H "Authorization: $AUTH_HEADER")
 
           echo "===== SPDX License Report ====="
           echo "$REPORT"
 
+          # ===== Fetch all supported reports =====
+          echo "📦 Fetching all supported Fossology reports..."
+          FORMATS=(dep5 spdx2 spdx2tv readmeoss unifiedreport clixml decisionexporter)
+          mkdir -p fossology_reports
+
+          for FORMAT in "${FORMATS[@]}"; do
+            echo "🔍 Fetching format: $FORMAT"
+            AUTH_HEADER=$(assemble_token)
+            REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=$FORMAT" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER")
+
+            if echo "$REPORT" | jq . >/dev/null 2>&1; then
+              echo "$REPORT" > "fossology_reports/report_$FORMAT.json"
+              echo "✅ Saved: report_$FORMAT.json"
+            else
+              echo "$REPORT" > "fossology_reports/report_$FORMAT.txt"
+              echo "⚠️ Non-JSON output saved: report_$FORMAT.txt"
+            fi
+          done
+
           # ===== Cleanup =====
+          echo "🧹 Cleaning up token fragments..."
           rm -rf token_parts
