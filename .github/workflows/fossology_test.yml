@@ -1,4 +1,4 @@
-name: Fossology Test (Multi-Format SPDX + Token Split + Conversion)
+name: Fossology Full Scan (Token Split + Multi-Format)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       scan_type:
         description: "Type of scan"
         required: true
-        default: "docker"
+        default: "repo"
         type: choice
         options: [docker, repo, file]
       docker_image:
@@ -52,6 +52,7 @@ jobs:
               ;;
             repo)
               git clone "${{ github.event.inputs.repo_url }}" repo/
+              echo "# SPDX-License-Identifier: MIT" > repo/spdx_dummy.py
               tar -czf repo.tar.gz -C repo .
               FILE_TO_UPLOAD="repo.tar.gz"
               MIME_TYPE="application/x-tar"
@@ -91,17 +92,9 @@ jobs:
           printf "%s" "${RAW_TOKEN:60:60}" > token_parts/part2.txt
           printf "%s" "${RAW_TOKEN:120}" > token_parts/part3.txt
 
-          echo "✅ Token acquired, valid until $EXPIRY"
-          for f in token_parts/part*.txt; do
-            LEN=$(wc -c < "$f" | tr -d ' ')
-            HASH=$(sha256sum "$f" | cut -d' ' -f1)
-            echo " - $(basename "$f"): length=$LEN, sha256=$HASH"
-          done
-
       - name: Upload file to Fossology
         run: |
           AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-          echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
           UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8081/repo/api/v1/uploads" \
             -H "accept: application/json" \
             -H "folderId: 1" \
@@ -123,11 +116,9 @@ jobs:
 
           UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
-          echo "✅ Uploaded with ID: $UPLOAD_ID"
 
       - name: Wait for folder ID
         run: |
-          echo "⏳ Waiting for upload $UPLOAD_ID to be ready..."
           while true; do
             AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
             UPLOAD_INFO=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
@@ -137,16 +128,12 @@ jobs:
             FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid // empty')
             if [[ "$FOLDER_ID" =~ ^[0-9]+$ ]]; then
               echo "FOLDER_ID=$FOLDER_ID" >> $GITHUB_ENV
-              echo "📂 Using folder ID: $FOLDER_ID"
               break
             fi
-
-            MSG=$(echo "$UPLOAD_INFO" | jq -r '.message // empty')
-            echo "   Still processing: $MSG"
             sleep 2
           done
 
-      - name: Trigger unpack job to ensure archive is processed
+      - name: Trigger unpack job
         run: |
           AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
           UNPACK_JSON=$(jq -n '{unpack:true}')
@@ -159,19 +146,16 @@ jobs:
             -d "{\"analysis\": $UNPACK_JSON}")
 
           UNPACK_JOB_ID=$(echo "$UNPACK_RESP" | jq -r '.id // .message')
-          echo "🧩 Unpack job triggered. Job ID: $UNPACK_JOB_ID"
-
           while true; do
             STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$UNPACK_JOB_ID" \
               -H "accept: application/json" \
               -H "Authorization: $AUTH_HEADER" | jq -r '.status')
-            echo "Unpack job status: $STATUS"
             [[ "$STATUS" == "Completed" ]] && break
             [[ "$STATUS" == "Failed" ]] && exit 1
             sleep 5
           done
-          
-      - name: Trigger Fossology agents
+
+      - name: Trigger scan job
         run: |
           ANALYSIS_JSON=$(jq -n \
             --argjson nomos $([[ "${{ github.event.inputs.agents_nomos }}" == "true" ]] && echo true || echo false) \
@@ -191,24 +175,20 @@ jobs:
             -d "{\"analysis\": $ANALYSIS_JSON}")
 
           JOB_ID=$(echo "$JOB_RESP" | jq -r '.message // .id')
-          echo "⏳ Waiting for job $JOB_ID to complete..."
           while true; do
-            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
             STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
               -H "accept: application/json" \
               -H "Authorization: $AUTH_HEADER" | jq -r '.status')
-            echo "Job status: $STATUS"
             [[ "$STATUS" == "Completed" ]] && break
             [[ "$STATUS" == "Failed" ]] && exit 1
             sleep 10
           done
 
-      - name: Fetch Fossology reports (valid formats only)
+      - name: Fetch Fossology reports
         run: |
           mkdir -p fossology_reports
-          valid_formats=("spdx2" "spdx2tv" "dep5" "readmeoss" "unifiedreport" "clixml" "decisionexporter")
-
-          for format in "${valid_formats[@]}"; do
+          formats=("spdx2" "spdx2tv" "dep5" "readmeoss" "unifiedreport" "clixml" "decisionexporter")
+          for format in "${formats[@]}"; do
             echo "📄 Fetching report in $format format..."
             AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
             REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=$format" \
