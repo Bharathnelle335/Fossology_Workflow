@@ -46,8 +46,23 @@ jobs:
             -H "uploadType: file" \
             -H "Authorization: $AUTH_HEADER" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
+          echo "📦 UPLOAD_RESP:"
+          echo "$UPLOAD_RESP" | jq .
           UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
+
+      - name: ⏳ Wait for upload to be ready
+        run: |
+          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)"
+          echo "⏳ Waiting for upload $UPLOAD_ID to be ready..."
+          while true; do
+            STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER" | jq -r '.status // empty')
+            echo "$(date '+%H:%M:%S') 📦 Upload status: $STATUS"
+            [[ "$STATUS" == "Completed" ]] && break
+            sleep 5
+          done
 
       - name: 🔍 Trigger scan job
         run: |
@@ -60,7 +75,10 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: $AUTH_HEADER" \
             -d "{\"analysis\": $ANALYSIS_JSON}")
+          echo "📦 JOB_RESP:"
+          echo "$JOB_RESP" | jq .
           JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
+          echo "JOB_ID=$JOB_ID"
 
           echo "🕒 Monitoring scan progress..."
           while true; do
