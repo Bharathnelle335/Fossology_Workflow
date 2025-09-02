@@ -206,7 +206,7 @@ jobs:
       - name: Convert SPDX JSON to YAML and Markdown
         run: |
           pip install yq
-          cat fossology_reports/report_spdx2.json | yq -P > fossology_reports/report_spdx2.yaml
+          python3 -m yq -P fossology_reports/report_spdx2.json > fossology_reports/report_spdx2.yaml
           echo "# SPDX License Summary" > fossology_reports/report_spdx2.md
           jq -r '.files[] | "- **File**: \(.fileName)\n  - **Licenses**: \([.licenses[]?.shortName] // ["NO LICENSE"])"' \
             fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.md
