@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload file to Fossology
         run: |
-          AUTH_HEADER=$(assemble_token)
+          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
           echo "📤 Uploading $FILE_TO_UPLOAD to Fossology..."
           UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8081/repo/api/v1/uploads" \
             -H "accept: application/json" \
@@ -132,7 +132,7 @@ jobs:
         run: |
           echo "⏳ Waiting for upload $UPLOAD_ID to be ready..."
           while true; do
-            AUTH_HEADER=$(assemble_token)
+            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
             UPLOAD_INFO=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
               -H "accept: application/json" \
               -H "Authorization: $AUTH_HEADER")
@@ -159,7 +159,7 @@ jobs:
             --argjson keyword $([[ "${{ github.event.inputs.agents_keyword }}" == "true" ]] && echo true || echo false) \
             '{nomos:$nomos, monk:$monk, copyright:$copyright, email:$email, keyword:$keyword}')
 
-          AUTH_HEADER=$(assemble_token)
+          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
             -H "accept: application/json" \
             -H "folderId: $FOLDER_ID" \
@@ -171,7 +171,7 @@ jobs:
           JOB_ID=$(echo "$JOB_RESP" | jq -r '.message // .id')
           echo "⏳ Waiting for job $JOB_ID to complete..."
           while true; do
-            AUTH_HEADER=$(assemble_token)
+            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
             STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
               -H "accept: application/json" \
               -H "Authorization: $AUTH_HEADER" | jq -r '.status')
@@ -196,7 +196,7 @@ jobs:
           for ext in "${!formats[@]}"; do
             mime="${formats[$ext]}"
             echo "📄 Fetching SPDX2 as .$ext..."
-            AUTH_HEADER=$(assemble_token)
+            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
             curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
               -H "Authorization: $AUTH_HEADER" \
               -H "Accept: $mime" \
