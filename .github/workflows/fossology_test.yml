@@ -181,26 +181,25 @@ jobs:
             sleep 10
           done
 
-      - name: Fetch SPDX reports in all formats
+      - name: Fetch Fossology reports (valid formats only)
         run: |
           mkdir -p fossology_reports
-          declare -A formats=(
-            ["json"]="application/json"
-            ["csv"]="text/csv"
-            ["txt"]="text/plain"
-            ["html"]="text/html"
-            ["rdf"]="application/rdf+xml"
-            ["xls"]="application/vnd.ms-excel"
-          )
+          valid_formats=("spdx2" "spdx2tv" "dep5" "readmeoss" "unifiedreport" "clixml" "decisionexporter")
 
-          for ext in "${!formats[@]}"; do
-            mime="${formats[$ext]}"
-            echo "📄 Fetching SPDX2 as .$ext..."
-            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-            curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
-              -H "Authorization: $AUTH_HEADER" \
-              -H "Accept: $mime" \
-              -o "fossology_reports/report_spdx2.$ext"
+          for format in "${valid_formats[@]}"; do
+          echo "📄 Fetching report in $format format..."
+          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
+           REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=$format" \
+           -H "accept: application/json" \
+          -H "Authorization: $AUTH_HEADER")
+
+          if echo "$REPORT" | jq . >/dev/null 2>&1; then
+            echo "$REPORT" > "fossology_reports/report_${format}.json"
+            echo "✅ Saved: report_${format}.json"
+           else
+            echo "$REPORT" > "fossology_reports/report_${format}.txt"
+            echo "⚠️ Non-JSON output saved: report_${format}.txt"
+          fi
           done
 
       - name: Convert SPDX JSON to YAML and Markdown (with fallback)
