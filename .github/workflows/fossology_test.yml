@@ -178,6 +178,31 @@ jobs:
             sleep 10
           done
 
+      - name: Trigger unpack job to ensure archive is processed
+        run: |
+          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
+          UNPACK_JSON=$(jq -n '{unpack:true}')
+          UNPACK_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
+            -H "accept: application/json" \
+            -H "folderId: $FOLDER_ID" \
+            -H "uploadId: $UPLOAD_ID" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $AUTH_HEADER" \
+            -d "{\"analysis\": $UNPACK_JSON}")
+
+          UNPACK_JOB_ID=$(echo "$UNPACK_RESP" | jq -r '.id // .message')
+          echo "🧩 Unpack job triggered. Job ID: $UNPACK_JOB_ID"
+
+          while true; do
+            STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$UNPACK_JOB_ID" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER" | jq -r '.status')
+            echo "Unpack job status: $STATUS"
+            [[ "$STATUS" == "Completed" ]] && break
+            [[ "$STATUS" == "Failed" ]] && exit 1
+            sleep 5
+          done
+
       - name: Fetch Fossology reports (valid formats only)
         run: |
           mkdir -p fossology_reports
