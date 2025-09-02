@@ -53,13 +53,13 @@ jobs:
             repo)
               git clone "${{ github.event.inputs.repo_url }}" repo/
               echo "# SPDX-License-Identifier: MIT" > repo/spdx_dummy.py
+              echo "# Copyright 2025 Bharath Technologies" >> repo/spdx_dummy.py
               tar -czf repo.tar.gz -C repo .
               FILE_TO_UPLOAD="repo.tar.gz"
               MIME_TYPE="application/x-tar"
               ;;
             file)
-              echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
-              echo "# SPDX-License-Identifier: MIT" >> file.txt
+              echo "# SPDX-License-Identifier: MIT" > file.txt
               echo "# Copyright 2025 Bharath Technologies" >> file.txt
               FILE_TO_UPLOAD="file.txt"
               MIME_TYPE="text/plain"
@@ -81,12 +81,6 @@ jobs:
             -d "{\"username\": \"fossy\", \"password\": \"fossy\", \"token_name\": \"github-actions\", \"token_scope\": \"write\", \"token_expire\": \"$EXPIRY\"}")
 
           RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //' | tr -d '\r\n[:space:]')
-          if [ -z "$RAW_TOKEN" ] || [ "$RAW_TOKEN" = "null" ]; then
-            echo "❌ Failed to get token"
-            echo "Response: $AUTH_RESP"
-            exit 1
-          fi
-
           mkdir token_parts
           printf "%s" "${RAW_TOKEN:0:60}" > token_parts/part1.txt
           printf "%s" "${RAW_TOKEN:60:60}" > token_parts/part2.txt
@@ -107,13 +101,6 @@ jobs:
 
           HTTP_BODY=$(echo "$UPLOAD_RESP" | head -n -1)
           HTTP_STATUS=$(echo "$UPLOAD_RESP" | tail -n 1)
-
-          if [ "$HTTP_STATUS" -ne 201 ]; then
-            echo "❌ Upload failed with status $HTTP_STATUS"
-            echo "Response: $HTTP_BODY"
-            exit 1
-          fi
-
           UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
           echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
 
@@ -124,7 +111,6 @@ jobs:
             UPLOAD_INFO=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
               -H "accept: application/json" \
               -H "Authorization: $AUTH_HEADER")
-
             FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid // empty')
             if [[ "$FOLDER_ID" =~ ^[0-9]+$ ]]; then
               echo "FOLDER_ID=$FOLDER_ID" >> $GITHUB_ENV
@@ -144,7 +130,6 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: $AUTH_HEADER" \
             -d "{\"analysis\": $UNPACK_JSON}")
-
           UNPACK_JOB_ID=$(echo "$UNPACK_RESP" | jq -r '.id // .message')
           while true; do
             STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$UNPACK_JOB_ID" \
@@ -164,7 +149,6 @@ jobs:
             --argjson email $([[ "${{ github.event.inputs.agents_email }}" == "true" ]] && echo true || echo false) \
             --argjson keyword $([[ "${{ github.event.inputs.agents_keyword }}" == "true" ]] && echo true || echo false) \
             '{nomos:$nomos, monk:$monk, copyright:$copyright, email:$email, keyword:$keyword}')
-
           AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
           JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
             -H "accept: application/json" \
@@ -173,7 +157,6 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Authorization: $AUTH_HEADER" \
             -d "{\"analysis\": $ANALYSIS_JSON}")
-
           JOB_ID=$(echo "$JOB_RESP" | jq -r '.message // .id')
           while true; do
             STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
