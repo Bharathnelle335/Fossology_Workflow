@@ -149,7 +149,7 @@ jobs:
             sleep 2
           done
 
-            - name: Trigger Fossology agents
+      - name: Trigger Fossology agents
         run: |
           ANALYSIS_JSON=$(jq -n \
             --argjson nomos $([[ "${{ github.event.inputs.agents_nomos }}" == "true" ]] && echo true || echo false) \
