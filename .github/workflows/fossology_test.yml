@@ -203,19 +203,43 @@ jobs:
               -o "fossology_reports/report_spdx2.$ext"
           done
 
-      - name: Convert SPDX JSON to YAML and Markdown
+      - name: Convert SPDX JSON to YAML and Markdown (with fallback)
         run: |
-          pip install yq
-          python3 -m yq -P fossology_reports/report_spdx2.json > fossology_reports/report_spdx2.yaml
-          echo "# SPDX License Summary" > fossology_reports/report_spdx2.md
-          jq -r '.files[] | "- **File**: \(.fileName)\n  - **Licenses**: \([.licenses[]?.shortName] // ["NO LICENSE"])"' \
-            fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.md
+          echo "🔄 Converting SPDX JSON to YAML and Markdown..."
+          SUCCESS=true
+          mkdir -p fossology_reports
 
-      - name: Upload SPDX artifacts
+          # YAML conversion
+          if command -v yq >/dev/null; then
+            if yq -P fossology_reports/report_spdx2.json > fossology_reports/report_spdx2.yaml; then
+              echo "✅ Converted JSON → YAML"
+            else
+              echo "⚠️ Failed to convert JSON to YAML"
+              SUCCESS=false
+            fi
+          else
+            echo "⚠️ yq not installed, skipping YAML conversion"
+            SUCCESS=false
+          fi
+
+          # Markdown conversion
+          echo "# SPDX License Summary" > fossology_reports/report_spdx2.md
+          if jq -e '.files | type == "array"' fossology_reports/report_spdx2.json > /dev/null; then
+            jq -r '.files[] | "- **File**: \(.fileName)\n  - **Licenses**: \([.licenses[]?.shortName] // ["NO LICENSE"])"' \
+              fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.md
+            echo "✅ Converted JSON → Markdown"
+          else
+            echo "⚠️ SPDX JSON is invalid or missing .files[]. Skipping Markdown conversion"
+            echo "_SPDX report could not be parsed. See JSON for details._" >> fossology_reports/report_spdx2.md
+            SUCCESS=false
+          fi
+
+          if [ "$SUCCESS" = false ]; then
+            echo "⚠️ One or more conversions failed. Proceeding to upload raw SPDX files only."
+          fi
+
+      - name: Upload all SPDX reports
         uses: actions/upload-artifact@v4
         with:
-          name: SPDX-Reports
+          name: SPDX-All-Formats
           path: fossology_reports/
-
-      - name: Cleanup token fragments
-        run: rm -rf token_parts
