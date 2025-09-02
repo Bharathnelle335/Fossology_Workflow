@@ -1,229 +1,110 @@
-name: Fossology Full Scan (Token Split + Multi-Format)
+name: Fossology Scan
 
 on:
   workflow_dispatch:
-    inputs:
-      scan_type:
-        description: "Type of scan"
-        required: true
-        default: "repo"
-        type: choice
-        options: [docker, repo, file]
-      docker_image:
-        required: false
-      repo_url:
-        required: false
-      file_path:
-        required: false
-      token_days:
-        required: true
-        default: "7"
-      agents_nomos:
-        default: "true"
-        type: boolean
-      agents_monk:
-        default: "false"
-        type: boolean
-      agents_copyright:
-        default: "true"
-        type: boolean
-      agents_email:
-        default: "false"
-        type: boolean
-      agents_keyword:
-        default: "false"
-        type: boolean
 
 jobs:
-  fossology:
+  fossology-scan:
     runs-on: ubuntu-latest
+    env:
+      FOLDER_ID: 1
+      FILE_TO_UPLOAD: repo.tar.gz
+      MIME_TYPE: application/x-tar
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: 🧱 Create dummy SPDX input
+      run: |
+        mkdir repo
+        echo "# SPDX-License-Identifier: MIT" > repo/dummy.py
+        tar -czf $FILE_TO_UPLOAD repo/
 
-      - name: Prepare input file
-        run: |
-          case "${{ github.event.inputs.scan_type }}" in
-            docker)
-              docker pull ${{ github.event.inputs.docker_image }}
-              docker save ${{ github.event.inputs.docker_image }} -o docker-image.tar
-              FILE_TO_UPLOAD="docker-image.tar"
-              MIME_TYPE="application/x-tar"
-              ;;
-            repo)
-              git clone "${{ github.event.inputs.repo_url }}" repo/
-              echo "# SPDX-License-Identifier: MIT" > repo/spdx_dummy.py
-              echo "# Copyright 2025 Bharath Technologies" >> repo/spdx_dummy.py
-              tar -czf repo.tar.gz -C repo .
-              FILE_TO_UPLOAD="repo.tar.gz"
-              MIME_TYPE="application/x-tar"
-              ;;
-            file)
-              echo "# SPDX-License-Identifier: MIT" > file.txt
-              echo "# Copyright 2025 Bharath Technologies" >> file.txt
-              FILE_TO_UPLOAD="file.txt"
-              MIME_TYPE="text/plain"
-              ;;
-          esac
-          echo "FILE_TO_UPLOAD=$FILE_TO_UPLOAD" >> $GITHUB_ENV
-          echo "MIME_TYPE=$MIME_TYPE" >> $GITHUB_ENV
+    - name: 🔐 Set Fossology Auth Header
+      run: echo "AUTH_HEADER=${{ secrets.FOSSOLOGY_TOKEN }}" >> $GITHUB_ENV
 
-      - name: Start Fossology and acquire token
-        run: |
-          docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
-          echo "⏳ Waiting for Fossology to start..."
-          sleep 60
+    - name: 📤 Upload to Fossology
+      run: |
+        UPLOAD_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/uploads" \
+          -H "Authorization: $AUTH_HEADER" \
+          -H "Content-Type: multipart/form-data" \
+          -F "file=@$FILE_TO_UPLOAD;type=$MIME_TYPE" \
+          -F "folderId=$FOLDER_ID")
+        echo "UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.id')" >> $GITHUB_ENV
 
-          EXPIRY=$(date -d "+${{ github.event.inputs.token_days }} days" +%Y-%m-%d)
-          AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
-            -H "accept: application/json" \
-            -H "Content-Type: application/json" \
-            -d "{\"username\": \"fossy\", \"password\": \"fossy\", \"token_name\": \"github-actions\", \"token_scope\": \"write\", \"token_expire\": \"$EXPIRY\"}")
+    - name: 🔓 Trigger unpack job
+      run: |
+        UNPACK_JSON=$(jq -n '{unpack:true}')
+        UNPACK_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
+          -H "Authorization: $AUTH_HEADER" \
+          -H "Content-Type: application/json" \
+          -H "folderId: $FOLDER_ID" \
+          -H "uploadId: $UPLOAD_ID" \
+          -d "{\"analysis\": $UNPACK_JSON}")
+        UNPACK_JOB_ID=$(echo "$UNPACK_RESP" | jq -r '.id')
+        while true; do
+          STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$UNPACK_JOB_ID" \
+            -H "Authorization: $AUTH_HEADER" | jq -r '.status')
+          [[ "$STATUS" == "Completed" ]] && break
+          [[ "$STATUS" == "Failed" ]] && exit 1
+          sleep 5
+        done
 
-          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //' | tr -d '\r\n[:space:]')
-          mkdir token_parts
-          printf "%s" "${RAW_TOKEN:0:60}" > token_parts/part1.txt
-          printf "%s" "${RAW_TOKEN:60:60}" > token_parts/part2.txt
-          printf "%s" "${RAW_TOKEN:120}" > token_parts/part3.txt
+    - name: 🔍 Trigger scan job
+      run: |
+        ANALYSIS_JSON=$(jq -n '{nomos:true, monk:false, copyright:true, email:false, keyword:false}')
+        JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
+          -H "Authorization: $AUTH_HEADER" \
+          -H "Content-Type: application/json" \
+          -H "folderId: $FOLDER_ID" \
+          -H "uploadId: $UPLOAD_ID" \
+          -d "{\"analysis\": $ANALYSIS_JSON}")
+        JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
+        while true; do
+          STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
+            -H "Authorization: $AUTH_HEADER" | jq -r '.status')
+          [[ "$STATUS" == "Completed" ]] && break
+          [[ "$STATUS" == "Failed" ]] && exit 1
+          sleep 10
+        done
 
-      - name: Upload file to Fossology
-        run: |
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-          UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:8081/repo/api/v1/uploads" \
-            -H "accept: application/json" \
-            -H "folderId: 1" \
-            -H "public: public" \
-            -H "applyGlobal: false" \
-            -H "ignoreScm: false" \
-            -H "uploadType: file" \
-            -H "Authorization: $AUTH_HEADER" \
-            -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
-
-          HTTP_BODY=$(echo "$UPLOAD_RESP" | head -n -1)
-          HTTP_STATUS=$(echo "$UPLOAD_RESP" | tail -n 1)
-          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
-          echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
-
-      - name: Wait for folder ID
-        run: |
-          while true; do
-            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-            UPLOAD_INFO=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
-              -H "accept: application/json" \
-              -H "Authorization: $AUTH_HEADER")
-            FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid // empty')
-            if [[ "$FOLDER_ID" =~ ^[0-9]+$ ]]; then
-              echo "FOLDER_ID=$FOLDER_ID" >> $GITHUB_ENV
-              break
-            fi
-            sleep 2
-          done
-
-      - name: Trigger unpack job
-        run: |
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-          UNPACK_JSON=$(jq -n '{unpack:true}')
-          UNPACK_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
-            -H "accept: application/json" \
-            -H "folderId: $FOLDER_ID" \
-            -H "uploadId: $UPLOAD_ID" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: $AUTH_HEADER" \
-            -d "{\"analysis\": $UNPACK_JSON}")
-          UNPACK_JOB_ID=$(echo "$UNPACK_RESP" | jq -r '.id // .message')
-          while true; do
-            STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$UNPACK_JOB_ID" \
-              -H "accept: application/json" \
-              -H "Authorization: $AUTH_HEADER" | jq -r '.status')
-            [[ "$STATUS" == "Completed" ]] && break
-            [[ "$STATUS" == "Failed" ]] && exit 1
-            sleep 5
-          done
-
-      - name: Trigger scan job
-        run: |
-          ANALYSIS_JSON=$(jq -n \
-            --argjson nomos $([[ "${{ github.event.inputs.agents_nomos }}" == "true" ]] && echo true || echo false) \
-            --argjson monk $([[ "${{ github.event.inputs.agents_monk }}" == "true" ]] && echo true || echo false) \
-            --argjson copyright $([[ "${{ github.event.inputs.agents_copyright }}" == "true" ]] && echo true || echo false) \
-            --argjson email $([[ "${{ github.event.inputs.agents_email }}" == "true" ]] && echo true || echo false) \
-            --argjson keyword $([[ "${{ github.event.inputs.agents_keyword }}" == "true" ]] && echo true || echo false) \
-            '{nomos:$nomos, monk:$monk, copyright:$copyright, email:$email, keyword:$keyword}')
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-          JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
-            -H "accept: application/json" \
-            -H "folderId: $FOLDER_ID" \
-            -H "uploadId: $UPLOAD_ID" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: $AUTH_HEADER" \
-            -d "{\"analysis\": $ANALYSIS_JSON}")
-          JOB_ID=$(echo "$JOB_RESP" | jq -r '.message // .id')
-          while true; do
-            STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
-              -H "accept: application/json" \
-              -H "Authorization: $AUTH_HEADER" | jq -r '.status')
-            [[ "$STATUS" == "Completed" ]] && break
-            [[ "$STATUS" == "Failed" ]] && exit 1
-            sleep 10
-          done
-
-      - name: Fetch Fossology reports
-        run: |
-          mkdir -p fossology_reports
-          formats=("spdx2" "spdx2tv" "dep5" "readmeoss" "unifiedreport" "clixml" "decisionexporter")
-          for format in "${formats[@]}"; do
-            echo "📄 Fetching report in $format format..."
-            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-            REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=$format" \
-              -H "accept: application/json" \
-              -H "Authorization: $AUTH_HEADER")
-
-            if echo "$REPORT" | jq . >/dev/null 2>&1; then
-              echo "$REPORT" > "fossology_reports/report_${format}.json"
-              echo "✅ Saved: report_${format}.json"
-            else
-              echo "$REPORT" > "fossology_reports/report_${format}.txt"
-              echo "⚠️ Non-JSON output saved: report_${format}.txt"
-            fi
-          done
-
-      - name: Convert SPDX JSON to YAML and Markdown (with fallback)
-        run: |
-          echo "🔄 Converting SPDX JSON to YAML and Markdown..."
-          SUCCESS=true
-          mkdir -p fossology_reports
-
-          # YAML conversion
-          if command -v yq >/dev/null; then
-            if yq -P fossology_reports/report_spdx2.json > fossology_reports/report_spdx2.yaml; then
-              echo "✅ Converted JSON → YAML"
-            else
-              echo "⚠️ Failed to convert JSON to YAML"
-              SUCCESS=false
-            fi
+    - name: 📄 Fetch reports
+      run: |
+        mkdir -p fossology_reports
+        formats=("spdx2" "spdx2tv" "dep5" "readmeoss" "unifiedreport" "clixml" "decisionexporter")
+        for format in "${formats[@]}"; do
+          echo "Fetching $format..."
+          REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=$format" \
+            -H "Authorization: $AUTH_HEADER")
+          if echo "$REPORT" | jq . >/dev/null 2>&1; then
+            echo "$REPORT" > "fossology_reports/report_${format}.json"
           else
-            echo "⚠️ yq not installed, skipping YAML conversion"
-            SUCCESS=false
+            echo "$REPORT" > "fossology_reports/report_${format}.txt"
           fi
+        done
 
-          # Markdown conversion
-          echo "# SPDX License Summary" > fossology_reports/report_spdx2.md
-          if jq -e '.files | type == "array"' fossology_reports/report_spdx2.json > /dev/null; then
-            jq -r '.files[] | "- **File**: \(.fileName)\n  - **Licenses**: \([.licenses[]?.shortName] // ["NO LICENSE"])"' \
-              fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.md
-            echo "✅ Converted JSON → Markdown"
-          else
-            echo "⚠️ SPDX JSON is invalid or missing .files[]. Skipping Markdown conversion"
-            echo "_SPDX report could not be parsed. See JSON for details._" >> fossology_reports/report_spdx2.md
-            SUCCESS=false
-          fi
+    - name: 🔄 Convert SPDX JSON to YAML and Markdown
+      run: |
+        SUCCESS=true
+        if command -v yq >/dev/null; then
+          yq -P fossology_reports/report_spdx2.json > fossology_reports/report_spdx2.yaml || SUCCESS=false
+        else
+          echo "yq not installed" && SUCCESS=false
+        fi
 
-          if [ "$SUCCESS" = false ]; then
-            echo "⚠️ One or more conversions failed. Proceeding to upload raw SPDX files only."
-          fi
+        echo "# SPDX License Summary" > fossology_reports/report_spdx2.md
+        if jq -e '.files | type == "array"' fossology_reports/report_spdx2.json > /dev/null; then
+          jq -r '.files[] | "- **File**: \(.fileName)\n  - **Licenses**: \([.licenses[]?.shortName] // ["NO LICENSE"])"' \
+            fossology_reports/report_spdx2.json >> fossology_reports/report_spdx2.md
+        else
+          echo "_SPDX report could not be parsed._" >> fossology_reports/report_spdx2.md
+          SUCCESS=false
+        fi
 
-      - name: Upload all SPDX reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: SPDX-All-Formats
-          path: fossology_reports/
+    - name: 📦 Upload all reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: SPDX-All-Formats
+        path: fossology_reports/
+        if-no-files-found: warn
+        compression-level: 6
+        overwrite: false
+        include-hidden-files: false
