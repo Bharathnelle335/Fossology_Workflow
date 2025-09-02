@@ -51,9 +51,10 @@ jobs:
               MIME_TYPE="application/x-tar"
               ;;
             repo)
-              echo "Repo URL: ${{ github.event.inputs.repo_url }}" > repo.txt
-              FILE_TO_UPLOAD="repo.txt"
-              MIME_TYPE="text/plain"
+              git clone "${{ github.event.inputs.repo_url }}" repo/
+              tar -czf repo.tar.gz -C repo .
+              FILE_TO_UPLOAD="repo.tar.gz"
+              MIME_TYPE="application/x-tar"
               ;;
             file)
               echo "File path: ${{ github.event.inputs.file_path }}" > file.txt
@@ -187,19 +188,19 @@ jobs:
           valid_formats=("spdx2" "spdx2tv" "dep5" "readmeoss" "unifiedreport" "clixml" "decisionexporter")
 
           for format in "${valid_formats[@]}"; do
-          echo "📄 Fetching report in $format format..."
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-           REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=$format" \
-           -H "accept: application/json" \
-          -H "Authorization: $AUTH_HEADER")
+            echo "📄 Fetching report in $format format..."
+            AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
+            REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=$format" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER")
 
-          if echo "$REPORT" | jq . >/dev/null 2>&1; then
-            echo "$REPORT" > "fossology_reports/report_${format}.json"
-            echo "✅ Saved: report_${format}.json"
-           else
-            echo "$REPORT" > "fossology_reports/report_${format}.txt"
-            echo "⚠️ Non-JSON output saved: report_${format}.txt"
-          fi
+            if echo "$REPORT" | jq . >/dev/null 2>&1; then
+              echo "$REPORT" > "fossology_reports/report_${format}.json"
+              echo "✅ Saved: report_${format}.json"
+            else
+              echo "$REPORT" > "fossology_reports/report_${format}.txt"
+              echo "⚠️ Non-JSON output saved: report_${format}.txt"
+            fi
           done
 
       - name: Convert SPDX JSON to YAML and Markdown (with fallback)
