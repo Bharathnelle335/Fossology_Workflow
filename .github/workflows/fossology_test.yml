@@ -91,10 +91,6 @@ jobs:
           printf "%s" "${RAW_TOKEN:60:60}" > token_parts/part2.txt
           printf "%s" "${RAW_TOKEN:120}" > token_parts/part3.txt
 
-          assemble_token() {
-            echo "Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
-          }
-
           echo "✅ Token acquired, valid until $EXPIRY"
           for f in token_parts/part*.txt; do
             LEN=$(wc -c < "$f" | tr -d ' ')
