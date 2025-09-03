@@ -198,7 +198,7 @@ jobs:
           log "📜 Scan payload:"
           echo "$SCAN_PAYLOAD" | jq .
 
-          # ====== 8️⃣ Run scan ======
+            # ====== 8️⃣ Run scan ======
           SCAN_JOB_ID=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
             -H "accept: application/json" \
             -H "folderId: $FOLDER_ID" \
@@ -220,33 +220,37 @@ jobs:
 
           mkdir -p fossology_reports
 
-          # ====== 9️⃣ Download native Fossology reports (skip if missing) ======
-          REPORT_FORMATS=("spdx2" "readmeoss" "license_text" "license_list")
-          for fmt in "${REPORT_FORMATS[@]}"; do
-            log "📥 Requesting $fmt report..."
-            REPORT_JOB=$(curl -s -X GET "$FOSSOLOGY_URL/report" \
-              -H "Authorization: $AUTH_HEADER" \
-              -H "reportFormat: $fmt" \
-              -H "uploadId: $UPLOAD_ID")
-            REPORT_PATH=$(echo "$REPORT_JOB" | jq -r '.message')
+            # ====== 9️⃣ Download native Fossology reports (skip if missing) ======
+                REPORT_FORMATS=("spdx2" "readmeoss" "license_text" "license_list")
+                for fmt in "${REPORT_FORMATS[@]}"; do
+                log "📥 Requesting $fmt report..."
+                REPORT_JOB=$(curl -s -X GET "$FOSSOLOGY_URL/report" \
+                    -H "Authorization: $AUTH_HEADER" \
+                    -H "reportFormat: $fmt" \
+                    -H "uploadId: $UPLOAD_ID")
+                REPORT_PATH=$(echo "$REPORT_JOB" | jq -r '.message')
 
-            if [[ "$REPORT_PATH" == "null" || -z "$REPORT_PATH" ]]; then
-              log "⚠️  $fmt report not available, skipping."
-              continue
-            fi
+                if [[ "$REPORT_PATH" == "null" || -z "$REPORT_PATH" ]]; then
+                    log "⚠️  $fmt report not available, skipping."
+                    continue
+                fi
 
             while true; do
-              HTTP_CODE=$(curl -s -o report.tmp -w "%{http_code}" "$REPORT_PATH" \
+                HTTP_CODE=$(curl -s -o report.tmp -w "%{http_code}" "$REPORT_PATH" \
                 -H "Authorization: $AUTH_HEADER")
-              [[ "$HTTP_CODE" == "200" ]] && break
-              [[ "$HTTP_CODE" == "404" ]] && { log "⚠️  $fmt report returned 404, skipping."; continue 2; }
-              log "⏳ Waiting for $fmt report..."
-              sleep 5
+                if [[ "$HTTP_CODE" == "200" ]]; then
+                mv report.tmp "fossology_reports/report_${fmt}_$(date +%Y%m%d_%H%M%S).${fmt}"
+                log "💾 Saved $fmt report"
+                break
+                elif [[ "$HTTP_CODE" == "404" ]]; then
+                log "⚠️  $fmt report returned 404, skipping."
+                break
+                else
+                log "⏳ Waiting for $fmt report..."
+                sleep 5
+                fi
+                done
             done
-
-            mv report.tmp "fossology_reports/report_${fmt}_$(date +%Y%m%d_%H%M%S).${fmt}"
-            log "💾 Saved $fmt report"
-          done
 
           # ====== 🔟 JSON → CSV flattener ======
           json_to_csv() {
