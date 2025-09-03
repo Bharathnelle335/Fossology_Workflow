@@ -59,7 +59,6 @@ jobs:
           TOKEN_NAME="ci-run"
           TOKEN_SCOPE="write"
           TOKEN_DAYS=7
-          REPORT_FORMAT="spdx2"
           SCAN_TYPE="${{ github.event.inputs.scan_type }}"
           DOCKER_IMAGE="${{ github.event.inputs.docker_image }}"
           REPO_URL="${{ github.event.inputs.repo_url }}"
@@ -187,18 +186,18 @@ jobs:
               nomos) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {nomos:true}') ;;
               ojo) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {ojo:true}') ;;
               monk) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {monk:true}') ;;
-                            copyright) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {copyright_email_author:true}') ;;
+              copyright) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {copyright_email_author:true}') ;;
               keyword) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {keyword:true}') ;;
               pkgagent) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {package:true}') ;;
             esac
           done
-          SCAN_PAYLOAD=$(jq -n \
+                    SCAN_PAYLOAD=$(jq -n \
             --argjson analysis "$ANALYSIS_JSON" \
             '{analysis:$analysis,decider:{nomos_monk:true,bulk_reused:true,new_scanner:true},reuse:{reuse_upload:0,reuse_group:0,reuse_main:false,reuse_enhanced:false}}')
           log "📜 Scan payload:"
           echo "$SCAN_PAYLOAD" | jq .
 
-            # ====== 8️⃣ Run scan ======
+          # ====== 8️⃣ Run scan ======
           SCAN_JOB_ID=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
             -H "accept: application/json" \
             -H "folderId: $FOLDER_ID" \
@@ -220,37 +219,60 @@ jobs:
 
           mkdir -p fossology_reports
 
-            # ====== 9️⃣ Download native Fossology reports (skip if missing) ======
-                REPORT_FORMATS=("spdx2" "readmeoss" "license_text" "license_list")
-                for fmt in "${REPORT_FORMATS[@]}"; do
-                log "📥 Requesting $fmt report..."
-                REPORT_JOB=$(curl -s -X GET "$FOSSOLOGY_URL/report" \
-                    -H "Authorization: $AUTH_HEADER" \
-                    -H "reportFormat: $fmt" \
-                    -H "uploadId: $UPLOAD_ID")
-                REPORT_PATH=$(echo "$REPORT_JOB" | jq -r '.message')
+          # ====== 9️⃣ Robust native Fossology report download ======
+          download_report() {
+            local REPORT_TYPE="$1"
+            local UPLOAD_ID="$2"
+            local FOLDER_ID="$3"
 
-                if [[ "$REPORT_PATH" == "null" || -z "$REPORT_PATH" ]]; then
-                    log "⚠️  $fmt report not available, skipping."
-                    continue
-                fi
+            log "📥 Requesting ${REPORT_TYPE} report..."
+            JOB_ID=$(curl -s -X POST \
+              -H "Authorization: $AUTH_HEADER" \
+              -H "Content-Type: application/json" \
+              -d "{\"reportFormat\":\"${REPORT_TYPE}\"}" \
+              "${FOSSOLOGY_URL}/uploads/${UPLOAD_ID}/reports" \
+              | jq -r '.message' | grep -oE '[0-9]+')
+
+            if [[ -z "$JOB_ID" || "$JOB_ID" == "null" ]]; then
+              log "⚠️ Failed to start ${REPORT_TYPE} report job"
+              return 1
+            fi
 
             while true; do
-                HTTP_CODE=$(curl -s -o report.tmp -w "%{http_code}" "$REPORT_PATH" \
-                -H "Authorization: $AUTH_HEADER")
-                if [[ "$HTTP_CODE" == "200" ]]; then
-                mv report.tmp "fossology_reports/report_${fmt}_$(date +%Y%m%d_%H%M%S).${fmt}"
-                log "💾 Saved $fmt report"
+              STATUS_JSON=$(curl -s -H "Authorization: $AUTH_HEADER" \
+                "${FOSSOLOGY_URL}/jobs/${JOB_ID}")
+              STATUS=$(echo "$STATUS_JSON" | jq -r '.status')
+              if [[ "$STATUS" == "Completed" ]]; then
                 break
-                elif [[ "$HTTP_CODE" == "404" ]]; then
-                log "⚠️  $fmt report returned 404, skipping."
-                break
-                else
-                log "⏳ Waiting for $fmt report..."
-                sleep 5
-                fi
-                done
+              elif [[ "$STATUS" == "Failed" ]]; then
+                ERR_MSG=$(echo "$STATUS_JSON" | jq -r '.errorMessage // "No error message"')
+                log "❌ ${REPORT_TYPE} report failed: $ERR_MSG"
+                return 1
+              fi
+              sleep 2
             done
+
+            curl -s -H "Authorization: $AUTH_HEADER" \
+              "${FOSSOLOGY_URL}/jobs/${JOB_ID}/download" \
+              -o "fossology_reports/report_${REPORT_TYPE}_$(date +%Y%m%d_%H%M%S).${REPORT_TYPE}"
+
+            log "💾 Saved ${REPORT_TYPE} report"
+            return 0
+          }
+
+          FAILED_COUNT=0
+          REPORTS=("spdx2" "readmeoss" "license_text" "license_list")
+
+          for REPORT in "${REPORTS[@]}"; do
+            if ! download_report "$REPORT" "$UPLOAD_ID" "$FOLDER_ID"; then
+              ((FAILED_COUNT++))
+            fi
+          done
+
+          if [[ $FAILED_COUNT -eq ${#REPORTS[@]} ]]; then
+            log "🚨 All reports failed"
+            exit 3
+          fi
 
           # ====== 🔟 JSON → CSV flattener ======
           json_to_csv() {
@@ -298,3 +320,4 @@ jobs:
         with:
           name: fossology-reports
           path: fossology_reports/*
+           
