@@ -248,7 +248,7 @@ jobs:
           for agent in "${AGENTS[@]}"; do
             API_AGENT="${AGENT_MAP[$agent]}"
             RESULT_JSON=$(curl -s "$FOSSOLOGY_URL/uploads/$UPLOAD_ID/licenses?agent=$API_AGENT" \
-              -H "Authorization: $AUTH_HEADER")
+              -H "Authorization: $AUTH_HEADER" || echo "[]")
             COUNT=$(echo "$RESULT_JSON" | jq 'length')
             AGENT_RESULTS[$agent]="$COUNT"
           done
@@ -307,16 +307,37 @@ jobs:
           REPORTS=("spdx2" "readmeoss" "license_text" "license_list")
           for REPORT in "${REPORTS[@]}"; do download_report "$REPORT" || true; done
 
-          # ====== 🔟 JSON endpoints (conditional) ======
+          # ====== 🔟 JSON endpoints (per-agent fetch) ======
           JSON_ENDPOINTS=()
+
+          # Licenses: only agents supported by /licenses?agent=
+          LICENSE_AGENTS=()
+          for agent in "${AGENTS[@]}"; do
+            case "$agent" in
+              nomos|ojo|monk|ninka|reportImport|scancode|spasht|reso|scanoss)
+                LICENSE_AGENTS+=("$agent")
+                ;;
+            esac
+          done
+          if [[ ${#LICENSE_AGENTS[@]} -gt 0 ]]; then
+            JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/licenses?agent=$(IFS=,; echo "${LICENSE_AGENTS[*]}")&containers=true")
+          fi
+
+          # Copyright: own endpoint
           if [[ " ${AGENTS[*]} " == *" copyright "* ]]; then
             JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/copyrights")
           fi
+
+          # Pkgagent: own endpoint
           if [[ " ${AGENTS[*]} " == *" pkgagent "* ]]; then
             JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/packages")
           fi
+
+          # Keyword: no JSON API in 4.3.0 → skip
+          # Findings still available in SPDX/README reports
+
+          # Common endpoints
           JSON_ENDPOINTS+=(
-            "uploads/$UPLOAD_ID/licenses?agent=$(IFS=,; echo "${AGENTS[*]}")&containers=true"
             "uploads/$UPLOAD_ID/decisions"
             "uploads/$UPLOAD_ID/obligations"
             "uploads/$UPLOAD_ID/summary"
