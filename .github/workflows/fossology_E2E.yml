@@ -308,10 +308,12 @@ jobs:
           for REPORT in "${REPORTS[@]}"; do download_report "$REPORT" || true; done
 
           # ====== 🔟 JSON endpoints (conditional) ======
+          JSON_ENDPOINTS=()
           if [[ " ${AGENTS[*]} " == *" copyright "* ]]; then
-            JSON_ENDPOINTS=("uploads/$UPLOAD_ID/copyrights")
-          else
-            JSON_ENDPOINTS=()
+            JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/copyrights")
+          fi
+          if [[ " ${AGENTS[*]} " == *" pkgagent "* ]]; then
+            JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/packages")
           fi
           JSON_ENDPOINTS+=(
             "uploads/$UPLOAD_ID/licenses?agent=$(IFS=,; echo "${AGENTS[*]}")&containers=true"
