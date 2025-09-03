@@ -1,0 +1,249 @@
+name: Fossology Scan E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: "Scan type: docker | repo"
+        required: true
+        default: "docker"
+      docker_image:
+        description: "Docker image (if scan_type=docker)"
+        default: "alpine:latest"
+      repo_url:
+        description: "Repo URL (if scan_type=repo)"
+        default: "https://github.com/example/repo.git"
+
+jobs:
+  fossology:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq git
+
+      - name: Run Fossology scan
+        run: |
+          set -euo pipefail
+
+          # ====== CONFIG ======
+          FOSSOLOGY_URL="http://localhost:8081/repo/api/v1"
+          USERNAME="fossy"
+          PASSWORD="fossy"
+          TOKEN_NAME="ci-run"
+          TOKEN_SCOPE="write"
+          TOKEN_DAYS=7
+          REPORT_FORMAT="spdx2"
+
+          SCAN_TYPE="${{ github.event.inputs.scan_type }}"
+          DOCKER_IMAGE="${{ github.event.inputs.docker_image }}"
+          REPO_URL="${{ github.event.inputs.repo_url }}"
+          FILE_PATH="./file.txt"
+
+          timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
+          log() { echo "[$(timestamp)] $*"; }
+
+          # ====== 1️⃣ Prepare input file ======
+          case "$SCAN_TYPE" in
+            docker)
+              log "🐳 Preparing Docker image..."
+              docker pull "$DOCKER_IMAGE"
+              docker save "$DOCKER_IMAGE" -o docker-image.tar
+              FILE_TO_UPLOAD="docker-image.tar"
+              MIME_TYPE="application/x-tar"
+              ;;
+            repo)
+              log "📂 Cloning repo..."
+              rm -rf repo
+              git clone "$REPO_URL" repo/
+              echo "# SPDX-License-Identifier: MIT" > repo/spdx_dummy.py
+              tar -czf repo.tar.gz -C repo .
+              FILE_TO_UPLOAD="repo.tar.gz"
+              MIME_TYPE="application/x-tar"
+              ;;
+            *)
+              log "❌ Unknown scan_type: $SCAN_TYPE"
+              exit 1
+              ;;
+          esac
+          log "✅ Prepared $FILE_TO_UPLOAD ($MIME_TYPE)"
+
+          # ====== 2️⃣ Start Fossology ======
+          log "🚀 Starting Fossology container..."
+          docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
+          log "⏳ Waiting for Fossology to start..."
+          sleep 60
+
+          # ====== 3️⃣ Get token (split into parts) ======
+          EXPIRY=$(date -d "+$TOKEN_DAYS days" +%Y-%m-%d)
+          AUTH_RESP=$(curl -s -X POST "$FOSSOLOGY_URL/tokens" \
+            -H "accept: application/json" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\": \"$USERNAME\", \"password\": \"$PASSWORD\", \"token_name\": \"$TOKEN_NAME\", \"token_scope\": \"$TOKEN_SCOPE\", \"token_expire\": \"$EXPIRY\"}")
+
+          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //' | tr -d '\r\n[:space:]')
+          if [ -z "$RAW_TOKEN" ] || [ "$RAW_TOKEN" = "null" ]; then
+            log "❌ Failed to get token"
+            echo "Response: $AUTH_RESP"
+            exit 1
+          fi
+
+          mkdir -p token_parts
+          printf "%s" "${RAW_TOKEN:0:60}" > token_parts/part1.txt
+          printf "%s" "${RAW_TOKEN:60:60}" > token_parts/part2.txt
+          printf "%s" "${RAW_TOKEN:120}" > token_parts/part3.txt
+          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)$(<token_parts/part3.txt)"
+          log "🔑 Token acquired and split"
+
+          # ====== 4️⃣ Upload file ======
+          UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "$FOSSOLOGY_URL/uploads" \
+            -H "accept: application/json" \
+            -H "folderId: 1" \
+            -H "public: public" \
+            -H "applyGlobal: false" \
+            -H "ignoreScm: false" \
+            -H "uploadType: file" \
+            -H "Authorization: $AUTH_HEADER" \
+            -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
+
+          HTTP_BODY=$(echo "$UPLOAD_RESP" | head -n -1)
+          HTTP_STATUS=$(echo "$UPLOAD_RESP" | tail -n 1)
+
+          if [ "$HTTP_STATUS" -ne 201 ]; then
+            log "❌ Upload failed with status $HTTP_STATUS"
+            echo "Response: $HTTP_BODY"
+            exit 1
+          fi
+
+          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
+          log "📦 Uploaded file, UPLOAD_ID=$UPLOAD_ID"
+
+          # ====== 5️⃣ Wait for folder ID ======
+          while true; do
+            UPLOAD_INFO=$(curl -s -X GET "$FOSSOLOGY_URL/uploads/$UPLOAD_ID" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER")
+            FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid // empty')
+            if [[ "$FOLDER_ID" =~ ^[0-9]+$ ]]; then
+              log "📂 FOLDER_ID=$FOLDER_ID"
+              break
+            fi
+            sleep 2
+          done
+
+          # ====== 6️⃣ Unpack job ======
+          UNPACK_JSON=$(jq -n '{unpack:true}')
+          UNPACK_RESP=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
+            -H "accept: application/json" \
+            -H "folderId: $FOLDER_ID" \
+            -H "uploadId: $UPLOAD_ID" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $AUTH_HEADER" \
+            -d "{\"analysis\": $UNPACK_JSON}")
+
+          UNPACK_JOB_ID=$(echo "$UNPACK_RESP" | jq -r '.id // .message')
+          while true; do
+            STATUS=$(curl -s -X GET "$FOSSOLOGY_URL/jobs/$UNPACK_JOB_ID" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER" | jq -r '.status')
+            [[ "$STATUS" == "Completed" ]] && break
+            [[ "$STATUS" == "Failed" ]] && exit 1
+            log "⏳ Unpack running..."
+            sleep 5
+          done
+          log "✅ Unpack complete"
+
+          # ====== 7️⃣ Full scan job ======
+          SCAN_PAYLOAD=$(jq -n \
+            '{analysis:{bucket:true,copyright_email_author:true,ecc:true,keyword:true,mime:true,monk:true,nomos:true,ojo:true,package:true},decider:{nomos_monk:true,bulk_reused:true,new_scanner:true},reuse:{reuse_upload:0,reuse_group:0,reuse_main:false,reuse_enhanced:false}}')
+
+          log "📜 Scan payload:"
+          echo "$SCAN_PAYLOAD" | jq .
+
+          SCAN_JOB_RESP=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
+            -H "accept: application/json" \
+            -H "folderId: $FOLDER_ID" \
+            -H "uploadId: $UPLOAD_ID" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $AUTH_HEADER" \
+            -d "$SCAN_PAYLOAD")
+
+          SCAN_JOB_ID=$(echo "$SCAN_JOB_RESP" | jq -r '.message')
+          while true; do
+            STATUS=$(curl -s -X GET "$FOSSOLOGY_URL/jobs/$SCAN_JOB_ID" \
+              -H "accept: application/json" \
+              -H "Authorization: $AUTH_HEADER" | jq -r '.status')
+            [[ "$STATUS" == "Completed" ]] && break
+            [[ "$STATUS" == "Failed" ]] && exit 1
+            log "⏳ Scans running..."
+            sleep 10
+          done
+          log "✅ Scans complete"
+
+          # ====== 8️⃣ Generate report ======
+          REPORT_JOB=$(curl -s -X GET "$FOSSOLOGY_URL/report" \
+            -H "Authorization: $AUTH_HEADER" \
+            -H "reportFormat: $REPORT_FORMAT" \
+            -H "uploadId: $UPLOAD_ID")
+
+          REPORT_PATH=$(echo "$REPORT_JOB" | jq -r '.message')
+          log "📝 Report path: $REPORT_PATH"
+
+            # ====== 9️⃣ Wait for report ready ======
+          while true; do
+            HTTP_CODE=$(curl -s -o report.tmp -w "%{http_code}" "$REPORT_PATH" \
+              -H "Authorization: $AUTH_HEADER")
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              break
+            fi
+            log "⏳ Waiting for report..."
+            sleep 5
+          done
+
+          # ====== 🔟 Save report ======
+          mkdir -p fossology_reports
+          REPORT_FILE="fossology_reports/report_${REPORT_FORMAT}_$(date +%Y%m%d_%H%M%S).$REPORT_FORMAT"
+          mv report.tmp "$REPORT_FILE"
+          log "💾 Saved report to $REPORT_FILE"
+
+          # ===== Dynamic JSON → CSV flattener =====
+          json_to_csv() {
+            jq -r '
+              def flatten:
+                . as $in
+                | if type=="object" then
+                    reduce keys[] as $k ({}; . + {($k): ($in[$k]|tostring)})
+                  elif type=="array" then
+                    reduce range(0; length) as $i ({}; . + {($i|tostring): (.[$i]|tostring)})
+                  else
+                    {"value": tostring}
+                  end;
+              (if type=="array" then . else [.] end) as $arr
+              | ($arr[0] | flatten | keys_unsorted) as $cols
+              | $cols, ($arr | map(flatten | [.[$cols[]]])[])
+              | @csv
+            '
+          }
+
+          # ===== 1️⃣1️⃣ Download license & copyright CSVs =====
+          OUTFILE="fossology_reports/license_list_$(date +%Y%m%d_%H%M%S).csv"
+          curl -s "$FOSSOLOGY_URL/uploads/$UPLOAD_ID/licenses?agent=nomos,monk,ojo&containers=true" \
+            -H "Authorization: $AUTH_HEADER" \
+          | json_to_csv > "$OUTFILE" || true
+          log "📊 License CSV rows: $(($(wc -l < "$OUTFILE") - 1))"
+
+          OUTFILE="fossology_reports/copyright_list_$(date +%Y%m%d_%H%M%S).csv"
+          curl -s "$FOSSOLOGY_URL/uploads/$UPLOAD_ID/copyrights" \
+            -H "Authorization: $AUTH_HEADER" \
+          | json_to_csv > "$OUTFILE" || true
+          log "📊 Copyright CSV rows: $(($(wc -l < "$OUTFILE") - 1))"
+
+          log "🎉 All done."
+
+      - name: Upload Fossology reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: fossology-reports
+          path: fossology_reports/*
