@@ -1,4 +1,4 @@
-name: Fossology Scan E2E
+name: Fossology Scan E2E(after co-pi)
 
 on:
   workflow_dispatch:
@@ -107,9 +107,17 @@ jobs:
 
           # ====== 2️⃣ Start Fossology ======
           log "🚀 Starting Fossology container..."
+          docker rm -f fossy || true
           docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
           log "⏳ Waiting for Fossology to start..."
-          sleep 60
+          for i in {1..30}; do
+            if curl -s http://localhost:8081/repo/api/v1/version >/dev/null; then
+              log "✅ Fossology is up"
+              break
+            fi
+            log "⏳ Waiting for Fossology ($i/30)..."
+            sleep 10
+          done
 
           # ====== 3️⃣ Get token ======
           EXPIRY=$(date -d "+$TOKEN_DAYS days" +%Y-%m-%d)
@@ -143,7 +151,7 @@ jobs:
             echo "Response: $HTTP_BODY"
             exit 1
           fi
-          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message')
+          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message // .id')
           log "📦 Uploaded file, UPLOAD_ID=$UPLOAD_ID"
 
           # ====== 5️⃣ Wait for folder ID ======
@@ -180,144 +188,90 @@ jobs:
           log "✅ Unpack complete"
 
           # ====== 7️⃣ Build dynamic scan payload ======
+          declare -A AGENT_MAP=(
+            ["nomos"]="nomos"
+            ["ojo"]="ojo"
+            ["monk"]="monk"
+            ["copyright"]="copyright_email_author"
+            ["keyword"]="keyword"
+            ["pkgagent"]="pkgagent"
+          )
+
           ANALYSIS_JSON=$(jq -n '{}')
           for agent in "${AGENTS[@]}"; do
-            case "$agent" in
-              nomos) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {nomos:true}') ;;
-              ojo) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {ojo:true}') ;;
-              monk) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {monk:true}') ;;
-              copyright) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {copyright_email_author:true}') ;;
-              keyword) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {keyword:true}') ;;
-              pkgagent) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {package:true}') ;;
-            esac
+            API_AGENT="${AGENT_MAP[$agent]}"
+            ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq --arg a "$API_AGENT" '. + {($a):true}')
           done
-                    SCAN_PAYLOAD=$(jq -n \
+          SCAN_PAYLOAD=$(jq -n \
             --argjson analysis "$ANALYSIS_JSON" \
             '{analysis:$analysis,decider:{nomos_monk:true,bulk_reused:true,new_scanner:true},reuse:{reuse_upload:0,reuse_group:0,reuse_main:false,reuse_enhanced:false}}')
           log "📜 Scan payload:"
           echo "$SCAN_PAYLOAD" | jq .
 
-          # ====== 8️⃣ Run scan ======
-          SCAN_JOB_ID=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
+          # ====== 8️⃣ Run scan + per-agent summary ======
+          SCAN_JOB_JSON=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
             -H "accept: application/json" \
             -H "folderId: $FOLDER_ID" \
             -H "uploadId: $UPLOAD_ID" \
             -H "Content-Type: application/json" \
             -H "Authorization: $AUTH_HEADER" \
-            -d "$SCAN_PAYLOAD" | jq -r '.message')
+            -d "$SCAN_PAYLOAD")
+
+          SCAN_JOB_ID=$(echo "$SCAN_JOB_JSON" | jq -r '.message // .id')
+          log "🚀 Started scan job ID=$SCAN_JOB_ID"
+
+          declare -A AGENT_STATUS
+          declare -A AGENT_RESULTS
 
           while true; do
-            STATUS=$(curl -s -X GET "$FOSSOLOGY_URL/jobs/$SCAN_JOB_ID" \
+            JOB_JSON=$(curl -s -X GET "$FOSSOLOGY_URL/jobs/$SCAN_JOB_ID" \
               -H "accept: application/json" \
-              -H "Authorization: $AUTH_HEADER" | jq -r '.status')
-            [[ "$STATUS" == "Completed" ]] && break
-            [[ "$STATUS" == "Failed" ]] && exit 1
-            log "⏳ Scans running..."
-            sleep 10
-          done
-          log "✅ Scans complete"
+              -H "Authorization: $AUTH_HEADER")
 
-          mkdir -p fossology_reports
+            TASKS=$(echo "$JOB_JSON" | jq -c '.tasks[]')
+            PENDING=0
+            for task in $TASKS; do
+              NAME=$(echo "$task" | jq -r '.name')
+              STATUS=$(echo "$task" | jq -r '.status')
 
-          # ====== 9️⃣ Robust native Fossology report download ======
-          download_report() {
-            local REPORT_TYPE="$1"
-            local UPLOAD_ID="$2"
-            local FOLDER_ID="$3"
-
-            log "📥 Requesting ${REPORT_TYPE} report..."
-            JOB_ID=$(curl -s -X POST \
-              -H "Authorization: $AUTH_HEADER" \
-              -H "Content-Type: application/json" \
-              -d "{\"reportFormat\":\"${REPORT_TYPE}\"}" \
-              "${FOSSOLOGY_URL}/uploads/${UPLOAD_ID}/reports" \
-              | jq -r '.message' | grep -oE '[0-9]+')
-
-            if [[ -z "$JOB_ID" || "$JOB_ID" == "null" ]]; then
-              log "⚠️ Failed to start ${REPORT_TYPE} report job"
-              return 1
-            fi
-
-            while true; do
-              STATUS_JSON=$(curl -s -H "Authorization: $AUTH_HEADER" \
-                "${FOSSOLOGY_URL}/jobs/${JOB_ID}")
-              STATUS=$(echo "$STATUS_JSON" | jq -r '.status')
-              if [[ "$STATUS" == "Completed" ]]; then
-                break
-              elif [[ "$STATUS" == "Failed" ]]; then
-                ERR_MSG=$(echo "$STATUS_JSON" | jq -r '.errorMessage // "No error message"')
-                log "❌ ${REPORT_TYPE} report failed: $ERR_MSG"
-                return 1
-              fi
-              sleep 2
+              case "$STATUS" in
+                Completed) AGENT_STATUS[$NAME]="Completed" ;;
+                Failed)    AGENT_STATUS[$NAME]="Failed" ;;
+                *)         AGENT_STATUS[$NAME]="Running"; ((PENDING++)) ;;
+              esac
             done
 
-            curl -s -H "Authorization: $AUTH_HEADER" \
-              "${FOSSOLOGY_URL}/jobs/${JOB_ID}/download" \
-              -o "fossology_reports/report_${REPORT_TYPE}_$(date +%Y%m%d_%H%M%S).${REPORT_TYPE}"
+            [[ "$PENDING" -eq 0 ]] && break
+            log "⏳ Scan running... pending=$PENDING"
+            sleep 10
+          done
+          log "✅ All scans complete"
 
-            log "💾 Saved ${REPORT_TYPE} report"
-            return 0
-          }
-
-          FAILED_COUNT=0
-          REPORTS=("spdx2" "readmeoss" "license_text" "license_list")
-
-          for REPORT in "${REPORTS[@]}"; do
-            if ! download_report "$REPORT" "$UPLOAD_ID" "$FOLDER_ID"; then
-              ((FAILED_COUNT++))
-            fi
+          # Count results per agent
+          for agent in "${AGENTS[@]}"; do
+            API_AGENT="${AGENT_MAP[$agent]}"
+            RESULT_JSON=$(curl -s "$FOSSOLOGY_URL/uploads/$UPLOAD_ID/licenses?agent=$API_AGENT" \
+              -H "Authorization: $AUTH_HEADER")
+            COUNT=$(echo "$RESULT_JSON" | jq 'length')
+            AGENT_RESULTS[$agent]="$COUNT"
           done
 
-          if [[ $FAILED_COUNT -eq ${#REPORTS[@]} ]]; then
-            log "🚨 All reports failed"
-            exit 3
-          fi
-
-          # ====== 🔟 JSON → CSV flattener ======
-          json_to_csv() {
-            jq -r '
-              def flatten:
-                . as $in
-                | if type=="object" then
-                    reduce keys[] as $k ({}; . + {($k): ($in[$k]|tostring)})
-                  elif type=="array" then
-                    reduce range(0; length) as $i ({}; . + {($i|tostring): (.[$i]|tostring)})
-                  else
-                    {"value": tostring}
-                  end;
-              (if type=="array" then . else [.] end) as $arr
-              | ($arr[0] | flatten | keys_unsorted) as $cols
-              | $cols, ($arr | map(flatten | [.[$cols[]]])[])
-              | @csv
-            '
-          }
-
-          # ====== 1️⃣1️⃣ Download JSON endpoints & convert to CSV ======
-          JSON_ENDPOINTS=(
-            "uploads/$UPLOAD_ID/licenses?agent=$(IFS=,; echo "${AGENTS[*]}")&containers=true"
-            "uploads/$UPLOAD_ID/copyrights"
-            "uploads/$UPLOAD_ID/decisions"
-            "uploads/$UPLOAD_ID/obligations"
-            "uploads/$UPLOAD_ID/summary"
-          )
-
-          for endpoint in "${JSON_ENDPOINTS[@]}"; do
-            NAME=$(echo "$endpoint" | sed 's/[^a-zA-Z0-9]/_/g')
-            RAW_JSON="fossology_reports/${NAME}_$(date +%Y%m%d_%H%M%S).json"
-            CSV_FILE="fossology_reports/${NAME}_$(date +%Y%m%d_%H%M%S).csv"
-            log "📡 Fetching $endpoint"
-            curl -s "$FOSSOLOGY_URL/$endpoint" \
-              -H "Authorization: $AUTH_HEADER" > "$RAW_JSON" || true
-            cat "$RAW_JSON" | json_to_csv > "$CSV_FILE" || true
-            log "💾 Saved $RAW_JSON and $CSV_FILE"
+          # Final summary table
+          echo ""
+          echo "==================== Scan Summary ===================="
+          printf "%-20s %-12s %-10s\n" "Agent" "Status" "Findings"
+          echo "------------------------------------------------------"
+          for agent in "${AGENTS[@]}"; do
+            API_AGENT="${AGENT_MAP[$agent]}"
+            printf "%-20s %-12s %-10s\n" \
+              "$agent" \
+              "${AGENT_STATUS[$API_AGENT]:-Unknown}" \
+              "${AGENT_RESULTS[$agent]:-N/A}"
           done
-
-          log "🎉 All reports and CSVs collected."
+          echo "======================================================"
 
       - name: Upload Fossology reports
         uses: actions/upload-artifact@v4
         with:
-          name: fossology-reports
+          name: fossology-reports-${{ github.run_id }}
           path: fossology_reports/*
-           
