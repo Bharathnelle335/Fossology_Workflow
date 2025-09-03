@@ -13,17 +13,31 @@ on:
       repo_url:
         description: "Repo URL (if scan_type=repo)"
         default: "https://github.com/example/repo.git"
-      agents:
-        description: |
-          Comma-separated list of agents to run. Options:
-          - nomos: Core license scanner (required for most license detection)
-          - ojo: Extended license scanner (depends on nomos)
-          - monk: Detects license text in archives/binaries
-          - copyright: Extracts copyright statements
-          - keyword: Finds license-related keywords
-          - pkgagent: Detects package metadata & license info
-        required: true
-        default: "nomos,monk"
+
+      agent_nomos:
+        type: boolean
+        description: "nomos – Core license scanner (required for most license detection)"
+        default: true
+      agent_ojo:
+        type: boolean
+        description: "ojo – Extended license scanner (depends on nomos)"
+        default: false
+      agent_monk:
+        type: boolean
+        description: "monk – Detects license text in archives/binaries"
+        default: true
+      agent_copyright:
+        type: boolean
+        description: "copyright – Extracts copyright statements"
+        default: false
+      agent_keyword:
+        type: boolean
+        description: "keyword – Finds license-related keywords"
+        default: false
+      agent_pkgagent:
+        type: boolean
+        description: "pkgagent – Detects package metadata & license info"
+        default: false
 
 jobs:
   fossology:
@@ -49,15 +63,19 @@ jobs:
           SCAN_TYPE="${{ github.event.inputs.scan_type }}"
           DOCKER_IMAGE="${{ github.event.inputs.docker_image }}"
           REPO_URL="${{ github.event.inputs.repo_url }}"
-          AGENTS_INPUT="${{ github.event.inputs.agents }}"
           timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
           log() { echo "[$(timestamp)] $*"; }
 
-          # ====== Parse agents & apply dependency rules ======
-          IFS=',' read -ra AGENTS <<< "$AGENTS_INPUT"
-          # Trim spaces
-          AGENTS=("${AGENTS[@]//[[:space:]]/}")
-          # Auto-add nomos if ojo is present
+          # ====== Build agent list from checkboxes ======
+          AGENTS=()
+          ${{ github.event.inputs.agent_nomos }} && AGENTS+=("nomos")
+          ${{ github.event.inputs.agent_ojo }} && AGENTS+=("ojo")
+          ${{ github.event.inputs.agent_monk }} && AGENTS+=("monk")
+          ${{ github.event.inputs.agent_copyright }} && AGENTS+=("copyright")
+          ${{ github.event.inputs.agent_keyword }} && AGENTS+=("keyword")
+          ${{ github.event.inputs.agent_pkgagent }} && AGENTS+=("pkgagent")
+
+          # Auto-add nomos if ojo is selected
           if [[ " ${AGENTS[*]} " == *" ojo "* ]] && [[ ! " ${AGENTS[*]} " == *" nomos "* ]]; then
             AGENTS+=("nomos")
           fi
@@ -169,7 +187,7 @@ jobs:
               nomos) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {nomos:true}') ;;
               ojo) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {ojo:true}') ;;
               monk) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {monk:true}') ;;
-              copyright) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {copyright_email_author:true}') ;;
+                            copyright) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {copyright_email_author:true}') ;;
               keyword) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {keyword:true}') ;;
               pkgagent) ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq '. + {package:true}') ;;
             esac
@@ -180,7 +198,7 @@ jobs:
           log "📜 Scan payload:"
           echo "$SCAN_PAYLOAD" | jq .
 
-            # ====== 8️⃣ Run scan ======
+          # ====== 8️⃣ Run scan ======
           SCAN_JOB_ID=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
             -H "accept: application/json" \
             -H "folderId: $FOLDER_ID" \
@@ -202,7 +220,7 @@ jobs:
 
           mkdir -p fossology_reports
 
-          # ====== 9️⃣ Download native Fossology reports ======
+          # ====== 9️⃣ Download native Fossology reports (skip if missing) ======
           REPORT_FORMATS=("spdx2" "readmeoss" "license_text" "license_list")
           for fmt in "${REPORT_FORMATS[@]}"; do
             log "📥 Requesting $fmt report..."
@@ -211,13 +229,21 @@ jobs:
               -H "reportFormat: $fmt" \
               -H "uploadId: $UPLOAD_ID")
             REPORT_PATH=$(echo "$REPORT_JOB" | jq -r '.message')
+
+            if [[ "$REPORT_PATH" == "null" || -z "$REPORT_PATH" ]]; then
+              log "⚠️  $fmt report not available, skipping."
+              continue
+            fi
+
             while true; do
               HTTP_CODE=$(curl -s -o report.tmp -w "%{http_code}" "$REPORT_PATH" \
                 -H "Authorization: $AUTH_HEADER")
               [[ "$HTTP_CODE" == "200" ]] && break
+              [[ "$HTTP_CODE" == "404" ]] && { log "⚠️  $fmt report returned 404, skipping."; continue 2; }
               log "⏳ Waiting for $fmt report..."
               sleep 5
             done
+
             mv report.tmp "fossology_reports/report_${fmt}_$(date +%Y%m%d_%H%M%S).${fmt}"
             log "💾 Saved $fmt report"
           done
