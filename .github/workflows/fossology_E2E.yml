@@ -4,9 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       scan_type:
-        description: "Scan type: docker | repo"
-        required: true
-        default: "docker"
+        type: choice
+        description: "Scan type"
+        options:
+          - docker
+          - repo
+        default: docker
       docker_image:
         description: "Docker image (if scan_type=docker)"
         default: "alpine:latest"
