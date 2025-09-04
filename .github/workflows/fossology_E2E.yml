@@ -144,21 +144,18 @@ jobs:
             -H "public: public" \
             -H "applyGlobal: false" \
             -H "ignoreScm: false" \
+            -H "uploadType: file" \
             -H "Authorization: $AUTH_HEADER" \
             -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
-
           HTTP_BODY=$(echo "$UPLOAD_RESP" | head -n -1)
           HTTP_STATUS=$(echo "$UPLOAD_RESP" | tail -n 1)
-
           if [ "$HTTP_STATUS" -ne 201 ]; then
             log "❌ Upload failed with status $HTTP_STATUS"
             echo "Response: $HTTP_BODY"
             exit 1
           fi
-
           UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message // .id')
           log "📦 Uploaded file, UPLOAD_ID=$UPLOAD_ID"
-
 
           # ====== 5️⃣ Wait for folder ID ======
           while true; do
