@@ -1,4 +1,4 @@
-name: Fossology Scan E2E
+name: Fossology Scan E2E with Tags input
 
 on:
   workflow_dispatch:
