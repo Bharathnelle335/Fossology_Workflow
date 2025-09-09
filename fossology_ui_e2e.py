@@ -5,7 +5,7 @@ import requests
 # ---------------- CONFIG ---------------- #
 OWNER = "Bharathnelle335"
 REPO = "Fossology_Workflow"
-WORKFLOW_FILE = "fossology_E2E.yml"
+WORKFLOW_FILE = "fossology_E2E_with_tags_input.yml"
 BRANCH = "main"
 TOKEN = st.secrets["GITHUB_TOKEN"]
 
