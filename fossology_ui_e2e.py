@@ -55,6 +55,11 @@ def selected_agents_dict(flags: dict) -> dict:
     # Convert bools to "true"/"false" (strings) for workflow inputs
     return {f"agent_{k}": str(v).lower() for k, v in flags.items()}
 
+def checkbox_with_caption(col, key, label, default, help_text, caption_text):
+    val = col.checkbox(label, value=default, help=help_text, key=f"cb_{key}")
+    col.caption(caption_text)
+    return val
+
 # ---------------- Inputs ---------------- #
 scan_type = st.radio("Select Scan Type", ["docker", "repo"], horizontal=True)
 
@@ -72,15 +77,53 @@ repo_ref_input = st.text_input(
 )
 
 st.markdown("### Select Agents")
+
+# Render checkboxes with tooltips + captions
 cols = st.columns(3)
 agents = {
-    "nomos": cols[0].checkbox("nomos", True),
-    "ojo": cols[1].checkbox("ojo"),
-    "monk": cols[2].checkbox("monk", True),
-    "copyright": cols[0].checkbox("copyright"),
-    "keyword": cols[1].checkbox("keyword"),
-    "pkgagent": cols[2].checkbox("pkgagent"),
+    "nomos": checkbox_with_caption(
+        cols[0], "nomos", "nomos", True,
+        "Core license scanner; detects license identifiers/expressions. Often required for most license detection.",
+        "_Core license scanner_"
+    ),
+    "ojo": checkbox_with_caption(
+        cols[1], "ojo", "ojo", False,
+        "Extended license scanner to improve coverage beyond nomos. Complements nomos; often used together.",
+        "_Extended license scanner_"
+    ),
+    "monk": checkbox_with_caption(
+        cols[2], "monk", "monk", True,
+        "Finds license texts in archives/binaries and nested content; complements nomos/ojo.",
+        "_License text detection (archives/binaries)_"
+    ),
+    "copyright": checkbox_with_caption(
+        cols[0], "copyright", "copyright", False,
+        "Extracts copyright statements, author names, and emails from source files.",
+        "_Copyrights, authors, emails_"
+    ),
+    "keyword": checkbox_with_caption(
+        cols[1], "keyword", "keyword", False,
+        "Searches for license-related keywords and obligation cues in files.",
+        "_License-related keywords_"
+    ),
+    "pkgagent": checkbox_with_caption(
+        cols[2], "pkgagent", "pkgagent", False,
+        "Detects packages/manifests and collects package metadata (name, version, possible license info).",
+        "_Package & manifest metadata_"
+    ),
 }
+
+with st.expander("ℹ️ What does each agent do?"):
+    st.markdown(
+        """
+- **nomos** — Core license scanner; matches license IDs/expressions in files.
+- **ojo** — Extended license scanner; increases coverage alongside *nomos*.
+- **monk** — Detects license texts inside archives/binaries and nested content.
+- **copyright** — Extracts copyrights, authors, and emails.
+- **keyword** — Finds license-related keywords and potential obligations.
+- **pkgagent** — Identifies packages/manifests and gathers package metadata (name/version/license hints).
+        """
+    )
 
 # Live normalization preview (for user confidence)
 norm_repo_url, norm_repo_ref, meta = normalize_repo(repo_url_raw, repo_ref_input)
