@@ -29,6 +29,7 @@ HEADERS = {
 # ===============
 st.set_page_config(page_title="Fossology Scan Runner", layout="wide")
 st.title("Fossology Scanner")
+st.caption("© EY Internal Use Only")
 st.caption("Trigger the **FOSSology** workflow for Docker images, Git repos, or uploaded archives (ZIP/TAR). Includes **Load Tags**, run links, status polling, and tokened artifact downloads.")
 
 if not TOKEN:
