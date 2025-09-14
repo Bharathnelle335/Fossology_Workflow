@@ -1,0 +1,75 @@
+name: Fossology Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: "Input type: repo | file"
+        required: true
+      file_url:
+        description: "URL of uploaded file (if scan_type=file)"
+        required: false
+
+jobs:
+  fossology:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo (if scan_type=repo)
+        if: ${{ github.event.inputs.scan_type == 'repo' }}
+        uses: actions/checkout@v4
+
+      - name: Package repo
+        if: ${{ github.event.inputs.scan_type == 'repo' }}
+        run: tar -czf input.tar.gz .
+
+      - name: Download file (if scan_type=file)
+        if: ${{ github.event.inputs.scan_type == 'file' }}
+        run: curl -L "${{ github.event.inputs.file_url }}" -o input.tar.gz
+
+      - name: Start Fossology
+        run: |
+          docker run -d --name fossy -p 8081:80 fossology/fossology
+          sleep 60
+
+      - name: Upload to Fossology
+        run: |
+          curl -u fossy:fossy -F "fileInput=@input.tar.gz" \
+            "http://localhost:8081/repo/api/v1/uploads" > upload.json
+          cat upload.json
+
+      - name: Extract Upload ID
+        id: getid
+        run: |
+          UPLOAD_ID=$(jq -r '.id' upload.json)
+          echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
+
+      - name: Trigger agents (nomos, copyright, email)
+        run: |
+          curl -u fossy:fossy -X POST \
+            "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=nomos,copyright,email"
+
+      - name: Wait for scan to finish
+        run: sleep 60
+
+      - name: Download CSV report
+        run: |
+          curl -u fossy:fossy \
+            "http://localhost:8081/repo/api/v1/report?uploadId=${UPLOAD_ID}&reportFormat=csv" \
+            -o fossology_report.csv
+
+      - name: Convert CSV to Excel
+        run: |
+          pip install pandas openpyxl
+          python - <<'EOF'
+          import pandas as pd
+          df = pd.read_csv("fossology_report.csv")
+          df.to_excel("fossology_report.xlsx", index=False)
+          EOF
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fossology-reports
+          path: |
+            fossology_report.csv
+            fossology_report.xlsx
