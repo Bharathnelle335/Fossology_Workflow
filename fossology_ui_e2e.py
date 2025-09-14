@@ -313,7 +313,7 @@ if "dispatch_time" in st.session_state:
     with col_ctrl:
         auto = st.toggle("Auto-refresh", value=False, help="Refresh status every ~5s")
     if auto:
-        st.experimental_set_query_params(_=int(time.time()))
+        st.query_params["_"] = str(int(time.time()))
 
     with st.spinner("Fetching latest run..."):
         run = find_recent_run(WORKFLOW_FILE, since)
