@@ -1,7 +1,7 @@
 import re
 import time
 import base64
-from datetime import datetime, timedelta, timezone  # ← added timezone
+from datetime import datetime, timedelta, timezone  # timezone added
 
 import requests
 import streamlit as st
@@ -29,10 +29,10 @@ HEADERS = {
 # ===============
 st.set_page_config(page_title="Fossology Scan Runner", layout="wide")
 st.title("🧩 Fossology Scan Runner – Full UI")
-st.caption("Trigger the **FOSSology** workflow for Docker images, Git repos, or uploaded archives (ZIP/TAR). Includes **Load Tags**, run links, status polling, and artifact downloads.")
+st.caption("Trigger the **FOSSology** workflow for Docker images, Git repos, or uploaded archives (ZIP/TAR). Includes **Load Tags**, run links, status polling, and tokened artifact downloads.")
 
 if not TOKEN:
-    st.error("GitHub token missing. Add GITHUB_TOKEN to .streamlit/secrets.toml")
+    st.error("GitHub token missing. Add GITHUB_TOKEN to .streamlit/secrets.toml (fine-grained: Actions=Read).")
 
 # ===============
 # HELPERS
@@ -147,6 +147,19 @@ def get_run(run_id: int):
 
 def get_run_artifacts(run_id: int):
     return api_get(f"{API_BASE}/actions/runs/{run_id}/artifacts")
+
+# NEW: tokened artifact fetch (avoids 403 when clicking raw URL)
+def fetch_artifact_zip(artifact_id: int) -> bytes | None:
+    """
+    Download artifact ZIP via API using the Authorization header.
+    Requires PAT with Actions: Read (fine-grained) or a classic PAT with repo scope.
+    """
+    url = f"{API_BASE}/actions/artifacts/{artifact_id}/zip"
+    r = api_get(url)  # requests follows redirects; headers are included
+    if r.status_code == 200:
+        return r.content
+    st.error(f"Artifact download failed: {r.status_code} {r.text}")
+    return None
 
 def upload_blob_to_repo(bytes_data: bytes, filename: str) -> str:
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -285,8 +298,7 @@ if run_clicked:
             r = dispatch_workflow(inputs_payload)
         if r.status_code in (201, 204):
             st.success("Workflow dispatch accepted ✨")
-            # store dispatch time as timezone-aware (UTC)
-            st.session_state["dispatch_time"] = datetime.now(timezone.utc)  # ← changed
+            st.session_state["dispatch_time"] = datetime.now(timezone.utc)  # timezone-aware
         else:
             st.error(f"Dispatch failed: {r.status_code} {r.text}")
 
@@ -321,7 +333,7 @@ if "dispatch_time" in st.session_state:
             st.write(f"**Status:** {status}  |  **Conclusion:** {conclusion}")
             st.caption(f"Created: {created_at}  |  Updated: {updated_at}")
 
-        # Artifacts
+        # Artifacts (tokened downloads)
         art_resp = get_run_artifacts(run_id)
         if art_resp.status_code == 200:
             artifacts = art_resp.json().get("artifacts", [])
@@ -333,10 +345,28 @@ if "dispatch_time" in st.session_state:
                     name = a.get("name")
                     size_in_bytes = a.get("size_in_bytes")
                     expired = a.get("expired")
-                    download_url = a.get("archive_download_url")
+                    artifact_id = a.get("id")
+
                     st.write(f"• **{name}** — {size_in_bytes} bytes | Expired: {expired}")
-                    if download_url:
-                        st.markdown(f"[Download ZIP]({download_url})")
+
+                    fetch_key = f"fetch_{artifact_id}"
+                    buf_key = f"artifact_bytes_{artifact_id}"
+
+                    if st.button("Fetch", key=fetch_key):
+                        with st.spinner("Downloading artifact..."):
+                            content = fetch_artifact_zip(artifact_id)
+                        if content:
+                            st.session_state[buf_key] = content
+                            st.success("Ready to download")
+
+                    if buf_key in st.session_state:
+                        st.download_button(
+                            "Download ZIP",
+                            data=st.session_state[buf_key],
+                            file_name=f"{name}.zip",
+                            mime="application/zip",
+                            key=f"dl_{artifact_id}"
+                        )
         else:
             st.error(f"Failed to list artifacts: {art_resp.status_code} {art_resp.text}")
 
@@ -365,5 +395,5 @@ if "dispatch_time" in st.session_state:
 st.divider()
 st.caption(
     "Notes: • The workflow supports scan types: docker, repo, upload-zip, upload-tar. "
-    "• Use **Load Tags** to quickly pick a release tag. • Artifacts are named with an input tag and the run id."
+    "• Use **Load Tags** to quickly pick a release tag. • Artifacts are fetched via your token and offered as a ZIP download."
 )
