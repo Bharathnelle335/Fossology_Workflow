@@ -1,16 +1,20 @@
+# app.py — FOSSology UI with docker/git/upload, tag/branch picker, and run tracking
 import re
 import json
+import time
+import uuid
 import requests
 import streamlit as st
 
 # ---------------- CONFIG ---------------- #
 OWNER = "Bharathnelle335"
 REPO = "Fossology_Workflow"
-WORKFLOW_FILE = "fossology_E2E_with_tags_input.yml"  # must match the YAML filename in .github/workflows/
+WORKFLOW_FILE = "fossology_E2E_with_tags_input.yml"  # must match .github/workflows/<file>.yml
 BRANCH = "main"
-TOKEN = st.secrets["GITHUB_TOKEN"]  # add a classic fine-grained token with 'workflows:write' on this repo
+TOKEN = st.secrets["GITHUB_TOKEN"]  # fine-grained/classic token with workflow: write + actions: read
 
-headers = {
+BASE_API = "https://api.github.com"
+HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/vnd.github+json"
 }
@@ -25,8 +29,8 @@ GH_RE = re.compile(
     re.IGNORECASE,
 )
 
-def normalize_git(url: str, ref_input: str) -> tuple[str, str, dict]:
-    """Return (git_url_ending_dot_git, repo_ref, meta)."""
+def normalize_git(url: str, ref_input: str):
+    """Return (git_url_ending_dot_git, resolved_ref, meta dict)."""
     meta = {"parsed_from_url": False, "owner": None, "repo": None, "detected_ref": None}
     repo_url_git = (url or "").strip()
     detected_ref = None
@@ -34,7 +38,7 @@ def normalize_git(url: str, ref_input: str) -> tuple[str, str, dict]:
     m = GH_RE.match(repo_url_git)
     if m:
         owner = m.group("owner"); repo = m.group("repo")
-        meta["owner"], meta["repo"] = owner, repo
+        meta.update(owner=owner, repo=repo)
         detected_ref = m.group("ref")
         if not repo_url_git.endswith(".git"):
             repo_url_git = f"https://github.com/{owner}/{repo}.git"
@@ -45,97 +49,164 @@ def normalize_git(url: str, ref_input: str) -> tuple[str, str, dict]:
     repo_ref = (ref_input or "").strip() or (detected_ref or "main")
     return repo_url_git, repo_ref, meta
 
-def dispatch_workflow(inputs: dict) -> requests.Response:
-    url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
-    return requests.post(url, headers=headers, json={"ref": BRANCH, "inputs": inputs})
+def gh_get(url, **params):
+    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    if r.status_code >= 400:
+        raise RuntimeError(f"GET {url} -> {r.status_code} {r.text}")
+    return r.json()
 
-# ---------------- UI ---------------- #
-scan_type = st.radio(
-    "Scan type",
-    ["docker", "git", "upload-zip", "upload-tar"],
-    horizontal=True
-)
+def fetch_refs(owner: str, repo: str, per_page: int = 100):
+    tags = gh_get(f"{BASE_API}/repos/{owner}/{repo}/tags", per_page=per_page)
+    branches = gh_get(f"{BASE_API}/repos/{owner}/{repo}/branches", per_page=per_page)
+    tag_names = [t["name"] for t in tags] if isinstance(tags, list) else []
+    branch_names = [b["name"] for b in branches] if isinstance(branches, list) else []
+    # Build a single pick-list with prefixes so users know what they chose
+    options = [f"tag: {t}" for t in tag_names] + [f"branch: {b}" for b in branch_names]
+    # Prefer common defaults on top
+    options_sorted = list(dict.fromkeys(
+        ([o for o in options if o.endswith(" main")] +
+         [o for o in options if o.endswith(" master")] +
+         options)
+    ))
+    return options_sorted
 
-with st.container():
-    if scan_type == "docker":
-        docker_image = st.text_input("Docker image", "alpine:latest", help="e.g., nginx:1.25.5 or alpine:latest")
-        git_url_raw = git_ref = ""  # unused
-        archive_url = ""            # unused
-    elif scan_type == "git":
-        colg1, colg2 = st.columns([3, 2])
-        with colg1:
-            git_url_raw = st.text_input("Git URL", "https://github.com/psf/requests/tree/v2.32.3")
-        with colg2:
-            git_ref = st.text_input("Git ref (branch / tag / commit)", "", help="Leave blank if the URL already has /tree/<ref> or /releases/tag/<tag>")
-        docker_image = ""           # unused
-        archive_url = ""            # unused
-    else:
-        docker_image = ""           # unused
-        git_url_raw = git_ref = ""  # unused
-        placeholder = "https://example.com/source.tar.gz" if scan_type == "upload-tar" else "https://example.com/source.zip"
-        archive_url = st.text_input("Archive URL", placeholder, help="Public URL to .zip or .tar(.gz/.xz/.tgz/.txz)")
+def dispatch_workflow(inputs: dict):
+    url = f"{BASE_API}/repos/{OWNER}/{REPO}/actions/workflows/{WORKFLOW_FILE}/dispatches"
+    return requests.post(url, headers=HEADERS, json={"ref": BRANCH, "inputs": inputs}, timeout=30)
 
-client_run_id = st.text_input("Run tag (optional)", "", help="Opaque tag to help you find artifacts later (defaults to run_id).")
+def find_run_by_token(token: str, timeout_s: int = 60):
+    """Find the newly-created run by matching the run_name/display_title containing client_run_id."""
+    start = time.time()
+    while time.time() - start < timeout_s:
+        data = gh_get(f"{BASE_API}/repos/{OWNER}/{REPO}/actions/workflows/{WORKFLOW_FILE}/runs",
+                      event="workflow_dispatch", per_page=50)
+        runs = data.get("workflow_runs", [])
+        for r in runs:
+            title = r.get("display_title") or r.get("name") or ""
+            if token in title:
+                return r  # contains id, html_url, status, conclusion
+        time.sleep(3)
+    return None
 
-# Live preview for Git normalization
-if scan_type == "git" and git_url_raw:
-    norm_git_url, norm_git_ref, meta = normalize_git(git_url_raw, git_ref)
+def poll_run_status(run_id: int, max_seconds: int = 300):
+    start = time.time()
+    while time.time() - start < max_seconds:
+        r = gh_get(f"{BASE_API}/repos/{OWNER}/{REPO}/actions/runs/{run_id}")
+        status, concl = r.get("status"), r.get("conclusion")
+        yield status, concl, r
+        if status in ("completed",):
+            return
+        time.sleep(5)
+
+# ---------------- Inputs ---------------- #
+scan_type = st.radio("Scan type", ["docker", "git", "upload-zip", "upload-tar"], horizontal=True)
+
+docker_image = ""
+git_url_raw = ""
+git_ref_in = ""
+archive_url = ""
+
+if scan_type == "docker":
+    docker_image = st.text_input("Docker image", "alpine:latest",
+                                 help="Example: nginx:1.25.5 or alpine:latest")
+
+elif scan_type == "git":
+    colg1, colg2 = st.columns([3, 2])
+    with colg1:
+        git_url_raw = st.text_input("Git URL",
+                                    "https://github.com/psf/requests/tree/v2.32.3",
+                                    help="Any GitHub repo; /tree/<tag> /commit/<sha> /releases/tag/<tag> supported.")
+    with colg2:
+        git_ref_in = st.text_input("Git ref (optional)", "",
+                                   help="Branch / tag / commit. Leave blank if URL already encodes it.")
+
+    # Normalize + optional ref loader
+    norm_git_url, norm_git_ref, meta = normalize_git(git_url_raw, git_ref_in)
     with st.expander("🔎 Normalization preview", expanded=False):
-        st.write("**Repo URL (normalized):**", norm_git_url)
-        st.write("**Ref (resolved):**", norm_git_ref)
+        st.write("**Repo URL (normalized):**", norm_git_url or "—")
+        st.write("**Ref (resolved):**", norm_git_ref or "—")
         if meta["parsed_from_url"]:
             st.info(f"Detected ref `{meta['detected_ref']}` from the pasted URL.")
 
+    if meta["owner"] and meta["repo"] and st.button("📥 Load tags & branches"):
+        try:
+            choices = fetch_refs(meta["owner"], meta["repo"])
+            pick = st.selectbox("Pick a tag/branch", choices, key="pick_ref")
+            if pick:
+                # Overwrite git_ref_in with picked value
+                if pick.startswith("tag: "):
+                    st.session_state["git_ref_final"] = pick.replace("tag: ", "", 1)
+                elif pick.startswith("branch: "):
+                    st.session_state["git_ref_final"] = pick.replace("branch: ", "", 1)
+        except Exception as e:
+            st.error(f"Failed to fetch refs: {e}")
+
+elif scan_type in ("upload-zip", "upload-tar"):
+    placeholder = "https://example.com/source.tar.gz" if scan_type == "upload-tar" else "https://example.com/source.zip"
+    archive_url = st.text_input("Archive URL", placeholder,
+                                help="Public URL to .zip or .tar(.gz/.xz/.tgz/.txz). Workflow will download it.")
+
+client_run_id = st.text_input("Run tag (optional)", "",
+                              help="Used to find your run & artifacts. If empty, a random tag will be generated.")
+
 # ---------------- Submit ---------------- #
-if st.button("🚀 Start FOSSology scan"):
-    # Basic validation + normalization
-    if scan_type == "docker":
-        if not docker_image.strip():
-            st.error("❌ Please enter a Docker image (e.g., alpine:latest).")
-            st.stop()
-        inputs = {
-            "scan_type": "docker",
-            "docker_image": docker_image.strip(),
-            "git_url": "",
-            "git_ref": "",
-            "archive_url": "",
-            "client_run_id": client_run_id.strip(),
-        }
-
-    elif scan_type == "git":
-        norm_git_url, norm_git_ref, _ = normalize_git(git_url_raw, git_ref)
+if st.button("🚀 Start scan"):
+    # Resolve final git ref (if any was picked)
+    if scan_type == "git":
+        norm_git_url, norm_git_ref, meta = normalize_git(git_url_raw, git_ref_in)
+        if "git_ref_final" in st.session_state:
+            norm_git_ref = st.session_state["git_ref_final"]
         if not norm_git_url.lower().startswith("https://github.com/"):
-            st.error("❌ Provide a valid GitHub URL (owner/repo).")
+            st.error("❌ Provide a valid GitHub URL.")
             st.stop()
-        inputs = {
-            "scan_type": "git",
-            "docker_image": "",
-            "git_url": norm_git_url,
-            "git_ref": norm_git_ref,
-            "archive_url": "",
-            "client_run_id": client_run_id.strip(),
-        }
 
-    else:  # upload-zip / upload-tar
-        if not archive_url.strip():
-            st.error("❌ Provide an archive_url to a ZIP/TAR file.")
-            st.stop()
-        inputs = {
-            "scan_type": scan_type,
-            "docker_image": "",
-            "git_url": "",
-            "git_ref": "",
-            "archive_url": archive_url.strip(),
-            "client_run_id": client_run_id.strip(),
-        }
+    # Make sure we have a token tag to find the run
+    token_tag = (client_run_id or f"ui-{uuid.uuid4().hex[:8]}").strip()
 
-    # Fire the workflow
-    resp = dispatch_workflow(inputs)
-    if resp.status_code == 204:
-        st.success("✅ Scan initiated.")
-        st.markdown("**Inputs used:**")
-        st.code(json.dumps(inputs, indent=2))
-        st.link_button("Open GitHub Actions runs", f"https://github.com/{OWNER}/{REPO}/actions", type="primary")
-    else:
-        st.error(f"❌ Failed to dispatch ({resp.status_code})")
-        st.code(resp.text or "<no body>")
+    # Compose workflow inputs (must match YAML)
+    inputs = {
+        "scan_type": scan_type,
+        "docker_image": docker_image.strip() if scan_type == "docker" else "",
+        "git_url": norm_git_url if scan_type == "git" else "",
+        "git_ref": norm_git_ref if scan_type == "git" else "",
+        "archive_url": archive_url.strip() if scan_type in ("upload-zip", "upload-tar") else "",
+        "client_run_id": token_tag,
+    }
+
+    try:
+        resp = dispatch_workflow(inputs)
+        if resp.status_code == 204:
+            st.success("✅ Workflow dispatched.")
+            st.markdown("**Inputs used:**")
+            st.code(json.dumps(inputs, indent=2))
+
+            with st.status("Looking up the workflow run…", expanded=True) as status:
+                run = find_run_by_token(token_tag, timeout_s=90)
+                if not run:
+                    st.warning("Could not locate the run yet. Open the Actions tab below to view progress.")
+                    st.link_button("Open GitHub Actions", f"https://github.com/{OWNER}/{REPO}/actions", type="primary")
+                else:
+                    run_id = run["id"]
+                    run_url = run["html_url"]
+                    st.success(f"Found run: {run_id}")
+                    st.link_button("Open run in GitHub", run_url, type="primary")
+
+                    # Live status polling
+                    placeholder = st.empty()
+                    for status_str, conclusion, run_obj in poll_run_status(run_id, max_seconds=600):
+                        placeholder.info(f"Status: **{status_str}** • Conclusion: **{conclusion or '—'}**")
+                        if status_str == "completed":
+                            break
+
+                    # Final artifact hint
+                    st.markdown(
+                        f"📦 When finished, artifacts appear at the bottom of the run page:\n\n"
+                        f"- **fossology_report.csv**\n"
+                        f"- **fossology_report.xlsx**\n\n"
+                        f"[Open run]({run_url})"
+                    )
+        else:
+            st.error(f"❌ Dispatch failed ({resp.status_code})")
+            st.code(resp.text or "<no response body>")
+    except Exception as e:
+        st.exception(e)
