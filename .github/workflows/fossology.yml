@@ -1,75 +1,267 @@
-name: Fossology Scan
+name: "Fossology Scan"
+
+run-name: FOSSology ${{ inputs.scan_type }} • ${{ inputs.git_url || inputs.archive_url || 'upload' }} • ${{ inputs.client_run_id || github.run_id }}
 
 on:
   workflow_dispatch:
     inputs:
       scan_type:
-        description: "Input type: repo | file"
+        description: "What to scan"
         required: true
-      file_url:
-        description: "URL of uploaded file (if scan_type=file)"
+        type: choice
+        options: [git, upload-zip, upload-tar]
+        default: git
+
+      git_url:
+        description: "Git URL (e.g., https://github.com/org/repo or /tree/<tag> /commit/<sha> /releases/tag/<tag>)"
         required: false
+
+      git_ref:
+        description: "Branch / tag / commit (optional if included in git_url)"
+        required: false
+        default: ""
+
+      archive_url:
+        description: "Remote .zip or .tar(.gz|.xz|.tgz|.txz) URL for upload-zip/upload-tar (optional if using input/*)"
+        required: false
+        default: ""
+
+      client_run_id:
+        description: "Opaque run tag for artifact lookup"
+        required: false
+        default: ""
 
 jobs:
   fossology:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repo (if scan_type=repo)
-        if: ${{ github.event.inputs.scan_type == 'repo' }}
+      - name: Checkout repo (only needed if you want local files)
         uses: actions/checkout@v4
 
-      - name: Package repo
-        if: ${{ github.event.inputs.scan_type == 'repo' }}
-        run: tar -czf input.tar.gz .
-
-      - name: Download file (if scan_type=file)
-        if: ${{ github.event.inputs.scan_type == 'file' }}
-        run: curl -L "${{ github.event.inputs.file_url }}" -o input.tar.gz
-
-      - name: Start Fossology
+      - name: Install deps
+        shell: bash
         run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y git curl jq unzip xz-utils tar python3 python3-pip
+          pip3 install --no-input pandas openpyxl
+
+      # ---------------- Prepare INPUT_FILE (git / upload-zip / upload-tar) ----------------
+      - name: Prepare input from Git
+        if: ${{ github.event.inputs.scan_type == 'git' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW_URL="${{ github.event.inputs.git_url }}"
+          RAW_REF="${{ github.event.inputs.git_ref }}"
+
+          if [ -z "$RAW_URL" ]; then
+            echo "❌ git_url is required when scan_type=git" >&2
+            exit 1
+          fi
+
+          normalize_repo_url() {
+            local raw="$1" base_url="" det_ref=""
+            case "$raw" in
+              https://github.com/*/tree/*)
+                det_ref="${raw##*/tree/}"; det_ref="${det_ref%%/*}"
+                base_url="${raw%%/tree/*}.git"
+                ;;
+              https://github.com/*/commit/*)
+                det_ref="${raw##*/commit/}"; det_ref="${det_ref%%/*}"
+                base_url="${raw%%/commit/*}.git"
+                ;;
+              https://github.com/*/releases/tag/*)
+                det_ref="${raw##*/releases/tag/}"; det_ref="${det_ref%%/*}"
+                base_url="${raw%%/releases/tag/*}.git"
+                ;;
+              https://github.com/*/*)
+                base_url="${raw%.git}.git"
+                ;;
+              *)
+                base_url="$raw"
+                ;;
+            esac
+            echo "$base_url|$det_ref"
+          }
+
+          strip_ref() {
+            local r="$1"; r="${r#refs/heads/}"; r="${r#refs/tags/}"; echo "$r"
+          }
+
+          norm="$(normalize_repo_url "$RAW_URL")"
+          BASE_URL="${norm%%|*}"
+          DET_REF="${norm##*|}"
+          GIT_REF="$(strip_ref "$RAW_REF")"
+          if [ -z "$GIT_REF" ]; then
+            if [ -n "$DET_REF" ]; then GIT_REF="$DET_REF"; else GIT_REF="main"; fi
+          fi
+
+          echo "🔧 Repo: $BASE_URL @ $GIT_REF"
+          rm -rf repo-src
+          if git ls-remote --tags --heads "$BASE_URL" | grep -qE "refs/(heads|tags)/${GIT_REF}$"; then
+            echo "✅ Shallow clone"
+            git clone --depth 1 --branch "$GIT_REF" "$BASE_URL" repo-src || true
+          fi
+          if [ ! -d repo-src ]; then
+            echo "ℹ️ Fallback to full clone + detached checkout"
+            git clone "$BASE_URL" repo-src
+            cd repo-src
+            git fetch --all --tags --prune
+            git checkout --detach "$GIT_REF" || { echo "❌ Ref not found"; exit 1; }
+            cd -
+          fi
+
+          # Package as tar.gz for FOSSology
+          tar -czf input.tar.gz -C repo-src .
+          echo "UPLOAD_FILE=input.tar.gz" >> "$GITHUB_ENV"
+
+          # Label & tag
+          RAW_LABEL="$(basename "${BASE_URL%.*}")"
+          RUN_TAG_IN="${{ github.event.inputs.client_run_id }}"
+          [ -z "$RUN_TAG_IN" ] && RUN_TAG_IN="${GITHUB_RUN_ID}"
+          SAN_LABEL="$(echo "$RAW_LABEL" | tr '/:@\"<>|*?\r\n\\ ' '_' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)"
+          SAN_RUN_TAG="$(echo "$RUN_TAG_IN" | tr '/:@\"<>|*?\r\n\\ ' '_' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)"
+          echo "SCAN_LABEL=$SAN_LABEL" >> "$GITHUB_ENV"
+          echo "RUN_TAG=$SAN_RUN_TAG"  >> "$GITHUB_ENV"
+
+      - name: Prepare input from ZIP (remote or uploaded)
+        if: ${{ github.event.inputs.scan_type == 'upload-zip' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          URL="${{ github.event.inputs.archive_url }}"
+          if [ -n "$URL" ]; then
+            echo "📥 Downloading ZIP from $URL"
+            curl -fL --retry 3 "$URL" -o input/input.zip
+            FILE="input/input.zip"
+          else
+            FILE="$(ls input/*.zip 2>/dev/null | head -n1 || true)"
+            [ -z "$FILE" ] && { echo "❌ No ZIP found in input/ and no archive_url provided"; exit 1; }
+          fi
+          echo "UPLOAD_FILE=$FILE" >> "$GITHUB_ENV"
+
+          base="$(basename "${FILE%%\?*}")"
+          RAW_LABEL="${base%.*}"
+          RUN_TAG_IN="${{ github.event.inputs.client_run_id }}"
+          [ -z "$RUN_TAG_IN" ] && RUN_TAG_IN="${GITHUB_RUN_ID}"
+          SAN_LABEL="$(echo "$RAW_LABEL" | tr '/:@\"<>|*?\r\n\\ ' '_' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)"
+          SAN_RUN_TAG="$(echo "$RUN_TAG_IN" | tr '/:@\"<>|*?\r\n\\ ' '_' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)"
+          echo "SCAN_LABEL=$SAN_LABEL" >> "$GITHUB_ENV"
+          echo "RUN_TAG=$SAN_RUN_TAG"  >> "$GITHUB_ENV"
+
+      - name: Prepare input from TAR (remote or uploaded)
+        if: ${{ github.event.inputs.scan_type == 'upload-tar' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          URL="${{ github.event.inputs.archive_url }}"
+          if [ -n "$URL" ]; then
+            echo "📥 Downloading TAR from $URL"
+            curl -fL --retry 3 "$URL" -o input/input.tar.any
+            FILE="input/input.tar.any"
+          else
+            FILE="$(ls input/*.tar input/*.tar.gz input/*.tgz input/*.tar.xz input/*.txz 2>/dev/null | head -n1 || true)"
+            [ -z "$FILE" ] && { echo "❌ No TAR found in input/ and no archive_url provided"; exit 1; }
+          fi
+          echo "UPLOAD_FILE=$FILE" >> "$GITHUB_ENV"
+
+          base="$(basename "${FILE%%\?*}")"
+          RAW_LABEL="$base"
+          RAW_LABEL="${RAW_LABEL%.tar.gz}"; RAW_LABEL="${RAW_LABEL%.tgz}"
+          RAW_LABEL="${RAW_LABEL%.tar.xz}"; RAW_LABEL="${RAW_LABEL%.txz}"
+          RAW_LABEL="${RAW_LABEL%.tar}"
+          RUN_TAG_IN="${{ github.event.inputs.client_run_id }}"
+          [ -z "$RUN_TAG_IN" ] && RUN_TAG_IN="${GITHUB_RUN_ID}"
+          SAN_LABEL="$(echo "$RAW_LABEL" | tr '/:@\"<>|*?\r\n\\ ' '_' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)"
+          SAN_RUN_TAG="$(echo "$RUN_TAG_IN" | tr '/:@\"<>|*?\r\n\\ ' '_' | tr -cd 'A-Za-z0-9._-' | cut -c1-80)"
+          echo "SCAN_LABEL=$SAN_LABEL" >> "$GITHUB_ENV"
+          echo "RUN_TAG=$SAN_RUN_TAG"  >> "$GITHUB_ENV"
+
+      # ---------------- Run FOSSology locally in Docker ----------------
+      - name: Start FOSSology
+        shell: bash
+        run: |
+          set -euo pipefail
           docker run -d --name fossy -p 8081:80 fossology/fossology
-          sleep 60
+          echo "⏳ Waiting for FOSSology API..."
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8081/repo/api/v1/version >/dev/null 2>&1; then
+              echo "✅ FOSSology API is up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "❌ FOSSology did not become ready in time"
+          docker logs fossy || true
+          exit 1
 
-      - name: Upload to Fossology
+      - name: Upload to FOSSology
+        shell: bash
         run: |
-          curl -u fossy:fossy -F "fileInput=@input.tar.gz" \
+          set -euo pipefail
+          [ -f "${UPLOAD_FILE:-}" ] || { echo "❌ UPLOAD_FILE not set or missing"; exit 1; }
+          curl -fsS -u fossy:fossy -F "fileInput=@${UPLOAD_FILE}" \
             "http://localhost:8081/repo/api/v1/uploads" > upload.json
-          cat upload.json
+          jq . upload.json || true
 
       - name: Extract Upload ID
         id: getid
+        shell: bash
         run: |
-          UPLOAD_ID=$(jq -r '.id' upload.json)
-          echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
+          set -euo pipefail
+          UPLOAD_ID="$(jq -r '.id // empty' upload.json)"
+          [ -z "$UPLOAD_ID" ] && { echo "❌ Could not parse upload id"; exit 1; }
+          echo "UPLOAD_ID=$UPLOAD_ID" >> "$GITHUB_ENV"
+          echo "🆔 UPLOAD_ID=$UPLOAD_ID"
 
       - name: Trigger agents (nomos, copyright, email)
+        shell: bash
         run: |
-          curl -u fossy:fossy -X POST \
-            "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=nomos,copyright,email"
+          set -euo pipefail
+          curl -fsS -u fossy:fossy -X POST \
+            "http://localhost:8081/repo/api/v1/jobs?uploadId=${UPLOAD_ID}&agents=nomos,copyright,email" \
+            > jobs.json
+          jq . jobs.json || true
 
-      - name: Wait for scan to finish
-        run: sleep 60
-
-      - name: Download CSV report
+      - name: Wait for scan to finish & fetch CSV
+        shell: bash
         run: |
-          curl -u fossy:fossy \
-            "http://localhost:8081/repo/api/v1/report?uploadId=${UPLOAD_ID}&reportFormat=csv" \
-            -o fossology_report.csv
+          set -euo pipefail
+          # Poll for CSV availability (up to ~10 minutes)
+          for i in $(seq 1 120); do
+            if curl -fsS -u fossy:fossy \
+              "http://localhost:8081/repo/api/v1/report?uploadId=${UPLOAD_ID}&reportFormat=csv" \
+              -o fossology_report.csv; then
+              echo "✅ Report ready"
+              break
+            fi
+            sleep 5
+          done
+          [ -f fossology_report.csv ] || { echo "❌ Report not available"; exit 1; }
+          wc -l fossology_report.csv || true
 
       - name: Convert CSV to Excel
+        shell: bash
         run: |
-          pip install pandas openpyxl
-          python - <<'EOF'
+          set -euo pipefail
+          python3 - <<'EOF'
           import pandas as pd
           df = pd.read_csv("fossology_report.csv")
           df.to_excel("fossology_report.xlsx", index=False)
+          print("✅ Wrote fossology_report.xlsx with", len(df), "rows")
           EOF
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: fossology-reports
+          name: fossology-reports-${{ env.SCAN_LABEL || 'scan' }}-${{ env.RUN_TAG || github.run_id }}
           path: |
+            upload.json
+            jobs.json
             fossology_report.csv
             fossology_report.xlsx
+          if-no-files-found: error
