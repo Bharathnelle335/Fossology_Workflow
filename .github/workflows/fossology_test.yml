@@ -1,101 +1,416 @@
-name: Fossology Sample Scan
+name: Fossology Scan E2E with Tags & Archives
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        type: choice
+        description: "Scan type"
+        options: [docker, repo, upload-zip, upload-tar]
+        default: docker
+
+      docker_image:
+        description: "Docker image (when scan_type=docker)"
+        default: "alpine:latest"
+
+      repo_url:
+        description: "Repo URL (when scan_type=repo) OR file URL (when scan_type=upload-zip/upload-tar)"
+        default: "https://github.com/example/repo.git"
+
+      repo_ref:
+        description: "Branch / tag / commit to scan (when scan_type=repo)"
+        default: "main"
+
+      agent_nomos:
+        type: boolean
+        description: "nomos – Core license scanner (required for most license detection)"
+        default: true
+      agent_ojo:
+        type: boolean
+        description: "ojo – Extended license scanner (depends on nomos)"
+        default: false
+      agent_monk:
+        type: boolean
+        description: "monk – Detects license text in archives/binaries"
+        default: true
+      agent_copyright:
+        type: boolean
+        description: "copyright – Extracts copyright statements"
+        default: false
+      agent_keyword:
+        type: boolean
+        description: "keyword – Finds license-related keywords"
+        default: false
+      agent_pkgagent:
+        type: boolean
+        description: "pkgagent – Detects package metadata & license info"
+        default: false
 
 jobs:
-  fossology-scan:
+  fossology:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 🧱 Create SPDX-tagged dummy file
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
         run: |
-          echo "# SPDX-License-Identifier: MIT" > dummy.py
-          tar -czf dummy.tar.gz dummy.py
-          echo "FILE_TO_UPLOAD=dummy.tar.gz" >> $GITHUB_ENV
-          echo "MIME_TYPE=application/x-tar" >> $GITHUB_ENV
+          sudo apt-get update
+          sudo apt-get install -y jq git zip curl tar
 
-      - name: 🐳 Start Fossology and acquire token
+      - name: Run Fossology scan
+        id: scan
+        env:
+          FOSSOLOGY_URL: "http://localhost:8081/repo/api/v1"
+          USERNAME: "fossy"
+          PASSWORD: "fossy"
+          TOKEN_NAME: "ci-run"
+          TOKEN_SCOPE: "write"
+          TOKEN_DAYS: "7"
+          SCAN_TYPE: "${{ github.event.inputs.scan_type }}"
+          DOCKER_IMAGE: "${{ github.event.inputs.docker_image }}"
+          REPO_URL: "${{ github.event.inputs.repo_url }}"
+          REPO_REF: "${{ github.event.inputs.repo_ref }}"
         run: |
-          docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
-          echo "⏳ Waiting for Fossology to start..."
-          sleep 60
+          set -euo pipefail
 
-          EXPIRY=$(date -d "+7 days" +%Y-%m-%d)
-          AUTH_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/tokens" \
-            -H "accept: application/json" \
-            -H "Content-Type: application/json" \
-            -d "{\"username\": \"fossy\", \"password\": \"fossy\", \"token_name\": \"gh-action\", \"token_scope\": \"write\", \"token_expire\": \"$EXPIRY\"}")
+          timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
+          log() { echo "[$(timestamp)] $*"; }
 
-          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //' | tr -d '\r\n[:space:]')
-          if [ -z "$RAW_TOKEN" ] || [ "$RAW_TOKEN" = "null" ]; then
-            echo "❌ Failed to get token"
-            echo "Response: $AUTH_RESP"
-            exit 1
+          # ====== Build agent list from checkboxes (no 'true'/'false' command calls) ======
+          AGENTS=()
+          if [[ "${{ github.event.inputs.agent_nomos }}" == "true" ]]; then AGENTS+=("nomos"); fi
+          if [[ "${{ github.event.inputs.agent_ojo }}" == "true" ]]; then AGENTS+=("ojo"); fi
+          if [[ "${{ github.event.inputs.agent_monk }}" == "true" ]]; then AGENTS+=("monk"); fi
+          if [[ "${{ github.event.inputs.agent_copyright }}" == "true" ]]; then AGENTS+=("copyright"); fi
+          if [[ "${{ github.event.inputs.agent_keyword }}" == "true" ]]; then AGENTS+=("keyword"); fi
+          if [[ "${{ github.event.inputs.agent_pkgagent }}" == "true" ]]; then AGENTS+=("pkgagent"); fi
+
+          # Auto-add nomos if ojo is selected
+          if [[ " ${AGENTS[*]} " == *" ojo "* ]] && [[ " ${AGENTS[*]} " != *" nomos "* ]]; then
+            AGENTS+=("nomos")
           fi
+          log "🎯 Agents selected: ${AGENTS[*]:-<none>}"
 
-          mkdir token_parts
-          printf "%s" "${RAW_TOKEN:0:100}" > token_parts/part1.txt
-          printf "%s" "${RAW_TOKEN:100}" > token_parts/part2.txt
+          # ====== 1️⃣ Prepare input file ======
+          case "$SCAN_TYPE" in
+            docker)
+              log "🐳 Preparing Docker image..."
+              docker pull "$DOCKER_IMAGE"
+              docker save "$DOCKER_IMAGE" -o docker-image.tar
+              FILE_TO_UPLOAD="docker-image.tar"
+              MIME_TYPE="application/x-tar"
+              ;;
+            repo)
+              if [[ -z "${REPO_URL:-}" ]]; then
+                echo "❌ repo_url is required when scan_type=repo" >&2; exit 1
+              fi
+              : "${REPO_REF:=main}"
+              log "📂 Cloning repo at ref '$REPO_REF'..."
+              rm -rf repo
 
-      - name: 📤 Upload file to Fossology
-        run: |
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)"
-          UPLOAD_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/uploads" \
-            -H "accept: application/json" \
-            -H "folderId: 1" \
-            -H "uploadType: file" \
-            -H "Authorization: $AUTH_HEADER" \
-            -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
-          echo "📦 UPLOAD_RESP:"
-          echo "$UPLOAD_RESP" | jq .
-          UPLOAD_ID=$(echo "$UPLOAD_RESP" | jq -r '.message')
-          echo "UPLOAD_ID=$UPLOAD_ID" >> $GITHUB_ENV
+              # Try shallow clone for branch or tag
+              if git ls-remote --tags --heads "$REPO_URL" | grep -qE "\srefs/(heads|tags)/${REPO_REF}$"; then
+                git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" repo || true
+              fi
 
-      - name: ⏳ Wait for upload to be ready
-        run: |
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)"
-          echo "⏳ Waiting for upload $UPLOAD_ID to be ready..."
-          while true; do
-            STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/uploads/$UPLOAD_ID" \
-              -H "accept: application/json" \
-              -H "Authorization: $AUTH_HEADER" | jq -r '.status // empty')
-            echo "$(date '+%H:%M:%S') 📦 Upload status: $STATUS"
-            [[ "$STATUS" == "Completed" ]] && break
-            sleep 5
-          done
+              # Fallback for commit SHAs/other refs
+              if [[ ! -d repo ]]; then
+                git clone "$REPO_URL" repo
+                cd repo
+                git fetch --all --tags --prune
+                git checkout --detach "$REPO_REF"
+                cd ..
+              fi
 
-      - name: 🔍 Trigger scan job
-        run: |
-          ANALYSIS_JSON=$(jq -n '{nomos:true}')
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)"
-          JOB_RESP=$(curl -s -X POST "http://localhost:8081/repo/api/v1/jobs" \
-            -H "accept: application/json" \
-            -H "folderId: 1" \
-            -H "uploadId: '"$UPLOAD_ID"'" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: $AUTH_HEADER" \
-            -d "{\"analysis\": $ANALYSIS_JSON}")
-          echo "📦 JOB_RESP:"
-          echo "$JOB_RESP" | jq .
-          JOB_ID=$(echo "$JOB_RESP" | jq -r '.id')
-          echo "JOB_ID=$JOB_ID"
+              cd repo
+              log "✔ Checked out commit: $(git rev-parse HEAD)"
+              cd ..
 
-          echo "🕒 Monitoring scan progress..."
-          while true; do
-            STATUS=$(curl -s -X GET "http://localhost:8081/repo/api/v1/jobs/$JOB_ID" \
-              -H "accept: application/json" \
-              -H "Authorization: $AUTH_HEADER" | jq -r '.status')
-            echo "$(date '+%H:%M:%S') ⏳ Scan status: $STATUS"
-            [[ "$STATUS" == "Completed" ]] && break
-            [[ "$STATUS" == "Failed" ]] && exit 1
+              tar -czf repo.tar.gz -C repo .
+              FILE_TO_UPLOAD="repo.tar.gz"
+              MIME_TYPE="application/gzip"
+              ;;
+            upload-zip)
+              if [[ -z "${REPO_URL:-}" ]]; then
+                echo "❌ file URL is required in repo_url when scan_type=upload-zip" >&2; exit 1
+              fi
+              log "📥 Downloading ZIP from $REPO_URL ..."
+              curl -L --fail "$REPO_URL" -o source.zip
+              FILE_TO_UPLOAD="source.zip"
+              MIME_TYPE="application/zip"
+              ;;
+            upload-tar)
+              if [[ -z "${REPO_URL:-}" ]]; then
+                echo "❌ file URL is required in repo_url when scan_type=upload-tar" >&2; exit 1
+              fi
+              log "📥 Downloading TAR from $REPO_URL ..."
+              curl -L --fail "$REPO_URL" -o source.tar
+              FILE_TO_UPLOAD="source.tar"
+              MIME_TYPE="application/x-tar"
+              ;;
+            *)
+              log "❌ Unknown scan_type: $SCAN_TYPE"; exit 1
+              ;;
+          esac
+          log "✅ Prepared $FILE_TO_UPLOAD ($MIME_TYPE)"
+
+          # ====== 2️⃣ Start Fossology ======
+          log "🚀 Starting Fossology container..."
+          docker rm -f fossy || true
+          docker run -d --name fossy -p 8081:80 fossology/fossology:4.3.0
+          log "⏳ Waiting for Fossology to start..."
+          for i in {1..30}; do
+            if curl -s http://localhost:8081/repo/api/v1/version >/dev/null; then
+              log "✅ Fossology is up"; break
+            fi
+            log "⏳ Waiting... ($i/30)"
             sleep 10
           done
 
-      - name: 📄 Show SPDX result in console
-        run: |
-          AUTH_HEADER="Bearer $(<token_parts/part1.txt)$(<token_parts/part2.txt)"
-          REPORT=$(curl -s -X GET "http://localhost:8081/repo/api/v1/report?uploadId=$UPLOAD_ID&reportFormat=spdx2" \
+          # ====== 3️⃣ Get token ======
+          EXPIRY=$(date -d "+${TOKEN_DAYS} days" +%Y-%m-%d)
+          AUTH_RESP=$(curl -s -X POST "$FOSSOLOGY_URL/tokens" \
+            -H "accept: application/json" -H "Content-Type: application/json" \
+            -d "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\",\"token_name\":\"$TOKEN_NAME\",\"token_scope\":\"$TOKEN_SCOPE\",\"token_expire\":\"$EXPIRY\"}")
+          RAW_TOKEN=$(echo "$AUTH_RESP" | jq -r '.Authorization' | sed 's/^Bearer //' | tr -d '\r\n[:space:]')
+          if [[ -z "$RAW_TOKEN" || "$RAW_TOKEN" == "null" ]]; then
+            log "❌ Failed to get token"; echo "Response: $AUTH_RESP"; exit 1
+          fi
+          AUTH_HEADER="Bearer $RAW_TOKEN"
+          log "🔑 Token acquired"
+
+          # ====== 4️⃣ Upload file ======
+          UPLOAD_RESP=$(curl -s -w "\n%{http_code}" -X POST "$FOSSOLOGY_URL/uploads" \
             -H "accept: application/json" \
-            -H "Authorization: $AUTH_HEADER")
-          echo "🔍 SPDX Report Summary:"
-          echo "$REPORT" | jq '.files[] | {fileName, licenses: [.licenses[].shortName]}'
+            -H "folderId: 1" \
+            -H "public: public" \
+            -H "applyGlobal: false" \
+            -H "ignoreScm: false" \
+            -H "uploadType: file" \
+            -H "Authorization: $AUTH_HEADER" \
+            -F "fileInput=@$FILE_TO_UPLOAD;type=$MIME_TYPE")
+          HTTP_BODY=$(echo "$UPLOAD_RESP" | head -n -1)
+          HTTP_STATUS=$(echo "$UPLOAD_RESP" | tail -n 1)
+          if [[ "$HTTP_STATUS" != "201" ]]; then
+            log "❌ Upload failed with status $HTTP_STATUS"; echo "Response: $HTTP_BODY"; exit 1
+          fi
+          UPLOAD_ID=$(echo "$HTTP_BODY" | jq -r '.message // .id')
+          log "📦 Uploaded file, UPLOAD_ID=$UPLOAD_ID"
+
+          # ====== 5️⃣ Wait for folder ID ======
+          while true; do
+            UPLOAD_INFO=$(curl -s "$FOSSOLOGY_URL/uploads/$UPLOAD_ID" -H "accept: application/json" -H "Authorization: $AUTH_HEADER")
+            FOLDER_ID=$(echo "$UPLOAD_INFO" | jq -r '.folderid // empty')
+            [[ "$FOLDER_ID" =~ ^[0-9]+$ ]] && { log "📂 FOLDER_ID=$FOLDER_ID"; break; }
+            sleep 2
+          done
+
+          # ====== 6️⃣ Unpack job ======
+          UNPACK_JOB_ID=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
+            -H "accept: application/json" -H "folderId: $FOLDER_ID" -H "uploadId: $UPLOAD_ID" \
+            -H "Content-Type: application/json" -H "Authorization: $AUTH_HEADER" \
+            -d '{"analysis":{"unpack":true}}' | jq -r '.id // .message')
+          while true; do
+            STATUS=$(curl -s "$FOSSOLOGY_URL/jobs/$UNPACK_JOB_ID" -H "accept: application/json" -H "Authorization: $AUTH_HEADER" | jq -r '.status')
+            [[ "$STATUS" == "Completed" ]] && break
+            [[ "$STATUS" == "Failed" ]] && { echo "❌ Unpack failed"; exit 1; }
+            log "⏳ Unpack running..."; sleep 5
+          done
+          log "✅ Unpack complete"
+
+          # ====== 7️⃣ Build dynamic scan payload ======
+          declare -A AGENT_MAP=(
+            ["nomos"]="nomos"
+            ["ojo"]="ojo"
+            ["monk"]="monk"
+            ["copyright"]="copyright_email_author"
+            ["keyword"]="keyword"
+            ["pkgagent"]="pkgagent"
+          )
+          ANALYSIS_JSON=$(jq -n '{}')
+          for agent in "${AGENTS[@]}"; do
+            API_AGENT="${AGENT_MAP[$agent]}"
+            ANALYSIS_JSON=$(echo "$ANALYSIS_JSON" | jq --arg a "$API_AGENT" '. + {($a):true}')
+          done
+          SCAN_PAYLOAD=$(jq -n \
+            --argjson analysis "$ANALYSIS_JSON" \
+            '{analysis:$analysis,decider:{nomos_monk:true,bulk_reused:true,new_scanner:true},reuse:{reuse_upload:0,reuse_group:0,reuse_main:false,reuse_enhanced:false}}')
+          log "📜 Scan payload:"; echo "$SCAN_PAYLOAD" | jq .
+
+          # ====== 8️⃣ Run scan + poll ======
+          SCAN_JOB_ID=$(curl -s -X POST "$FOSSOLOGY_URL/jobs" \
+            -H "accept: application/json" -H "folderId: $FOLDER_ID" -H "uploadId: $UPLOAD_ID" \
+            -H "Content-Type: application/json" -H "Authorization: $AUTH_HEADER" \
+            -d "$SCAN_PAYLOAD" | jq -r '.id // .message' | grep -oE '[0-9]+')
+          log "🚀 Started scan job ID=$SCAN_JOB_ID"
+
+          declare -A AGENT_STATUS
+          declare -A AGENT_RESULTS
+          JOB_STATE="Unknown"
+
+          while true; do
+            JOB_JSON=$(curl -s "$FOSSOLOGY_URL/jobs/$SCAN_JOB_ID" -H "accept: application/json" -H "Authorization: $AUTH_HEADER")
+            JOB_STATE=$(echo "$JOB_JSON" | jq -r '.status // "Unknown"')
+            PENDING=0
+            echo "$JOB_JSON" | jq -c '.tasks // [] | .[]' | while read -r task; do
+              NAME=$(echo "$task" | jq -r '.name')
+              STATUS=$(echo "$task" | jq -r '.status')
+              case "$STATUS" in
+                Completed) echo "$NAME:Completed" ;;
+                Failed)    echo "$NAME:Failed" ;;
+                *)         echo "$NAME:Running" ;;
+              esac
+            done | while IFS=: read -r n s; do AGENT_STATUS["$n"]="$s"; [[ "$s" == "Running" ]] && PENDING=$((PENDING+1)); done
+            [[ "$JOB_STATE" =~ ^(Completed|Failed)$ ]] && break
+            log "⏳ Scan running... job_status=$JOB_STATE"
+            sleep 10
+          done
+          log "✅ All scans complete (job_status=$JOB_STATE)"
+
+          # ====== Count results per agent ======
+          for agent in "${AGENTS[@]}"; do
+            API_AGENT="${AGENT_MAP[$agent]}"
+            RESULT_JSON=$(curl -s "$FOSSOLOGY_URL/uploads/$UPLOAD_ID/licenses?agent=$API_AGENT" -H "Authorization: $AUTH_HEADER" || echo "[]")
+            COUNT=$(echo "$RESULT_JSON" | jq 'length')
+            AGENT_RESULTS[$agent]="$COUNT"
+          done
+
+          # ====== Reports dir ======
+          mkdir -p fossology_reports
+
+          # ====== 9️⃣ Reports download ======
+          log "🕐 Waiting 10s before requesting reports..."; sleep 10
+
+          download_report() {
+            local REPORT_TYPE="$1"
+            log "📥 Requesting ${REPORT_TYPE} report..."
+            JOB_ID=$(curl -s -X POST \
+              -H "Authorization: $AUTH_HEADER" -H "Content-Type: application/json" \
+              -d "{\"reportFormat\":\"${REPORT_TYPE}\"}" \
+              "${FOSSOLOGY_URL}/uploads/${UPLOAD_ID}/reports" | jq -r '.id // .message' | grep -oE '[0-9]+')
+            [[ -z "$JOB_ID" ]] && { log "⚠️ Failed to start ${REPORT_TYPE} report job"; return 1; }
+            while true; do
+              STATUS_JSON=$(curl -s -H "Authorization: $AUTH_HEADER" "${FOSSOLOGY_URL}/jobs/${JOB_ID}")
+              STATUS=$(echo "$STATUS_JSON" | jq -r '.status')
+              [[ "$STATUS" == "Completed" ]] && break
+              if [[ "$STATUS" == "Failed" ]]; then
+                ERR_MSG=$(echo "$STATUS_JSON" | jq -r '.errorMessage // "No error"')
+                log "❌ ${REPORT_TYPE} failed: $ERR_MSG"; return 1
+              fi
+              sleep 2
+            done
+            curl -s -H "Authorization: $AUTH_HEADER" \
+              "${FOSSOLOGY_URL}/jobs/${JOB_ID}/download" \
+              -o "fossology_reports/report_${REPORT_TYPE}_$(date +%Y%m%d_%H%M%S).${REPORT_TYPE}"
+            log "💾 Saved ${REPORT_TYPE} report"
+          }
+
+          for REPORT in spdx2 readmeoss license_text license_list; do
+            download_report "$REPORT" || true
+          done
+
+          # ====== 🔟 Extra JSON endpoints ======
+          JSON_ENDPOINTS=()
+          LICENSE_AGENTS=()
+          for agent in "${AGENTS[@]}"; do
+            case "$agent" in
+              nomos|ojo|monk) LICENSE_AGENTS+=("$agent");;
+            esac
+          done
+          if [[ ${#LICENSE_AGENTS[@]} -gt 0 ]]; then
+            JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/licenses?agent=$(IFS=,; echo "${LICENSE_AGENTS[*]}")&containers=true")
+          fi
+          if [[ " ${AGENTS[*]} " == *" copyright "* ]]; then
+            JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/copyrights")
+          fi
+          if [[ " ${AGENTS[*]} " == *" pkgagent "* ]]; then
+            JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/packages")
+          fi
+          JSON_ENDPOINTS+=("uploads/$UPLOAD_ID/decisions" "uploads/$UPLOAD_ID/obligations" "uploads/$UPLOAD_ID/summary")
+
+          json_to_csv() {
+            jq -r '
+              def flatten:
+                . as $in
+                | if type=="object" then
+                    reduce keys[] as $k ({}; . + {($k): ($in[$k]|tostring)} )
+                  elif type=="array" then
+                    reduce range(0; length) as $i ({}; . + {($i|tostring): (.[$i]|tostring)} )
+                  else
+                    {"value": tostring}
+                  end;
+              (if type=="array" then . else [.] end) as $arr
+              | ($arr[0] | flatten | keys_unsorted) as $cols
+              | $cols, ($arr | map(flatten | [.[$cols[]]])[] )
+              | @csv
+            '
+          }
+
+          for endpoint in "${JSON_ENDPOINTS[@]}"; do
+            NAME=$(echo "$endpoint" | sed 's/[^a-zA-Z0-9]/_/g')
+            RAW_JSON="fossology_reports/${NAME}_$(date +%Y%m%d_%H%M%S).json"
+            CSV_FILE="fossology_reports/${NAME}_$(date +%Y%m%d_%H%M%S).csv"
+            log "📡 Fetching $endpoint"
+            curl -s "$FOSSOLOGY_URL/$endpoint" -H "Authorization: $AUTH_HEADER" > "$RAW_JSON" || true
+            cat "$RAW_JSON" | json_to_csv > "$CSV_FILE" || true
+            log "💾 Saved $RAW_JSON and $CSV_FILE"
+          done
+
+          # ====== Final scan summary ======
+          echo ""
+          echo "==================== Scan Summary ===================="
+          printf "%-20s %-16s %-10s\n" "Agent" "Status" "Findings"
+          echo "------------------------------------------------------"
+          for agent in "${AGENTS[@]}"; do
+            API_AGENT="${AGENT_MAP[$agent]}"
+            STATUS="${AGENT_STATUS[$API_AGENT]:-$JOB_STATE}"
+            printf "%-20s %-16s %-10s\n" "$agent" "$STATUS" "${AGENT_RESULTS[$agent]:-N/A}"
+          done
+          echo "======================================================"
+
+          # Expose minimal outputs for summary step
+          echo "upload_id=$UPLOAD_ID" >> "$GITHUB_OUTPUT"
+          echo "job_state=$JOB_STATE" >> "$GITHUB_OUTPUT"
+
+      - name: Package Fossology reports into ZIP
+        run: |
+          mkdir -p out
+          zip -r out/fossology_reports_${GITHUB_RUN_ID}.zip fossology_reports
+
+      - name: Upload Fossology reports (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: fossology-reports-${{ github.run_id }}
+          path: out/fossology_reports_${{ github.run_id }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Job summary (result link & status)
+        env:
+          RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SCAN_STATE: "${{ steps.scan.outputs.job_state }}"
+          UPLOAD_ID: "${{ steps.scan.outputs.upload_id }}"
+          SCAN_TYPE: "${{ github.event.inputs.scan_type }}"
+          DOCKER_IMAGE: "${{ github.event.inputs.docker_image }}"
+          REPO_URL: "${{ github.event.inputs.repo_url }}"
+          REPO_REF: "${{ github.event.inputs.repo_ref }}"
+        run: |
+          {
+            echo "## ✅ Fossology Scan Result"
+            echo ""
+            echo "- **Run:** [$RUN_URL]($RUN_URL)"
+            echo "- **Scan type:** \`$SCAN_TYPE\`"
+            if [[ "$SCAN_TYPE" == "docker" ]]; then
+              echo "- **Docker image:** \`$DOCKER_IMAGE\`"
+            elif [[ "$SCAN_TYPE" == "repo" ]]; then
+              echo "- **Repo:** \`$REPO_URL\` @ \`$REPO_REF\`"
+            else
+              echo "- **File URL:** \`$REPO_URL\`"
+            fi
+            echo "- **Fossology Upload ID:** \`$UPLOAD_ID\`"
+            echo "- **Scan status:** **$SCAN_STATE**"
+            echo ""
+            echo "### 📦 Reports"
+            echo "- Artifact: **fossology-reports-${{ github.run_id }}** (contains SPDX, license text/list, JSON & CSVs)"
+          } >> "$GITHUB_STEP_SUMMARY"
