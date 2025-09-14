@@ -1,4 +1,4 @@
-name: Fossology Scan
+name: Fossology Scan no tar input
 
 on:
   workflow_dispatch:
