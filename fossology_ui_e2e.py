@@ -13,7 +13,7 @@ import streamlit as st
 OWNER = "Bharathnelle335"          # ➜ Your GitHub username/org
 REPO = "Fossology_Workflow"        # ➜ Repo that contains the workflow file
 BRANCH = "main"                    # ➜ Branch to dispatch on
-WORKFLOW_FILE = "fossology.yml"  # ➜ Exact workflow filename in the repo
+WORKFLOW_FILE = "fossology_E2E_with_tags_input.yml"  # ➜ Exact workflow filename in the repo
 
 # Token is expected from Streamlit secrets
 # Create .streamlit/secrets.toml with:  GITHUB_TOKEN = "ghp_xxx"
