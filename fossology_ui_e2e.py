@@ -12,7 +12,7 @@ import streamlit as st
 OWNER = "Bharathnelle335"          # ➜ Your GitHub username/org
 REPO = "Fossology_Workflow"        # ➜ Repo that contains the workflow file
 BRANCH = "main"                    # ➜ Branch to dispatch on
-WORKFLOW_FILE = "fossology.yml"  # ➜ Exact workflow filename in the repo
+WORKFLOW_FILE = "fossology.yml"    # ➜ Exact workflow filename in the repo
 
 # Token is expected from Streamlit secrets
 # Create .streamlit/secrets.toml with:  GITHUB_TOKEN = "ghp_xxx"
@@ -60,7 +60,7 @@ def normalize_repo(url: str, ref_input: str):
     - Extracts ref if user pasted a web URL (tree/tag/commit).
     - Fallback to provided ref_input if not present in URL.
     """
-    m = GH_RE.match(url.strip())
+    m = GH_RE.match((url or "").strip())
     if not m:
         return url, ref_input, {}
     owner = m.group("owner")
@@ -97,7 +97,7 @@ def list_refs(owner: str, repo: str):
     return branches, tags
 
 def sanitize_tag(s: str) -> str:
-    s = re.sub(r"[\s/:@#?&]", "-", s)
+    s = re.sub(r"[\s/:@#?&]", "-", s or "")
     s = re.sub(r"[^A-Za-z0-9._-]", "-", s)
     s = re.sub(r"-+", "-", s)
     return s.strip("-")
@@ -107,10 +107,10 @@ def predict_input_tag(scan_type: str, docker_image: str, repo_url: str, repo_ref
         return sanitize_tag(docker_image)
     if scan_type == "repo":
         m = GH_RE.match(repo_url or "")
-        repo_name = (m.group("repo") if m else (repo_url.rsplit("/", 1)[-1].replace(".git", "")))
-        return sanitize_tag(f"{repo_name}_{repo_ref}")
+        repo_name = (m.group("repo") if m else (repo_url.rsplit("/", 1)[-1].replace(".git", "") if repo_url else "repo"))
+        return sanitize_tag(f"{repo_name}_{repo_ref or 'main'}")
     if scan_type in ("upload-zip", "upload-tar"):
-        base = file_url_filename or (repo_url.rsplit("/", 1)[-1] if repo_url else "file")
+        base = file_url_filename or ((repo_url or "").rsplit("/", 1)[-1] if repo_url else "file")
         base = re.sub(r"\.(zip|tar|gz|tgz)$", "", base, flags=re.IGNORECASE)
         return sanitize_tag(base)
     return "input"
@@ -148,6 +148,15 @@ def get_run(run_id: int):
 
 def get_run_artifacts(run_id: int):
     return api_get(f"{API_BASE}/actions/runs/{run_id}/artifacts")
+
+# Prefer artifact whose name contains the predicted tag
+def sort_artifacts_scanoss_style(artifacts: list, predicted_tag: str) -> list:
+    tag = (predicted_tag or "").lower()
+    def score(a):
+        name = (a.get("name") or "").lower()
+        return 1 if (tag and tag in name) else 0
+    # Best: tag match; tie-breaker: larger id (newer)
+    return sorted(artifacts, key=lambda a: (score(a), a.get("id", 0)), reverse=True)
 
 # NEW: tokened artifact fetch (avoids 403 when clicking raw URL)
 def fetch_artifact_zip(artifact_id: int) -> bytes | None:
@@ -270,7 +279,13 @@ elif scan_type in ("upload-zip", "upload-tar"):
         file_url = st.session_state["_file_url_prefill"]
 
 # Predict input tag preview
-pred = predict_input_tag(scan_type, docker_image, repo_url if scan_type == "repo" else file_url, repo_ref, uploaded_name)
+pred = predict_input_tag(
+    scan_type,
+    docker_image,
+    repo_url if scan_type == "repo" else file_url,
+    repo_ref,
+    uploaded_name
+)
 st.info(f"**Expected filename tag:** `{pred}`  (used to suffix report files & artifact name)")
 
 # =========================
@@ -331,7 +346,7 @@ if "dispatch_time" in st.session_state:
 
         with col_stat:
             st.markdown(f"**Run:** [{html_url}]({html_url})")
-            st.write(f"**Status:** {status}  |  **Conclusion:** {conclusion}")
+            st.write(f"**Status:** {status}  |  **Conclusion:** {conclusion or '—'}")
             st.caption(f"Created: {created_at}  |  Updated: {updated_at}")
 
         # Artifacts (tokened downloads)
@@ -341,6 +356,9 @@ if "dispatch_time" in st.session_state:
             if not artifacts:
                 st.info("No artifacts yet. They appear after the job finishes the 'Upload Artifact' step.")
             else:
+                # 👉 Prefer artifact with predicted tag in the name (SCANOSS-like behavior)
+                artifacts = sort_artifacts_scanoss_style(artifacts, pred)
+
                 st.markdown("### 📦 Artifacts")
                 for a in artifacts:
                     name = a.get("name")
@@ -348,7 +366,8 @@ if "dispatch_time" in st.session_state:
                     expired = a.get("expired")
                     artifact_id = a.get("id")
 
-                    st.write(f"• **{name}** — {size_in_bytes} bytes | Expired: {expired}")
+                    match_badge = "  ✅ (tag match)" if (pred and pred.lower() in (name or "").lower()) else ""
+                    st.write(f"• **{name}** — {size_in_bytes} bytes | Expired: {expired}{match_badge}")
 
                     fetch_key = f"fetch_{artifact_id}"
                     buf_key = f"artifact_bytes_{artifact_id}"
