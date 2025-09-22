@@ -149,41 +149,26 @@ def get_run(run_id: int):
 def get_run_artifacts(run_id: int):
     return api_get(f"{API_BASE}/actions/runs/{run_id}/artifacts")
 
-# Prefer artifact whose name contains the predicted tag
-def sort_artifacts_scanoss_style(artifacts: list, predicted_tag: str) -> list:
-    tag = (predicted_tag or "").lower()
-    def score(a):
-        name = (a.get("name") or "").lower()
-        return 1 if (tag and tag in name) else 0
-    # Best: tag match; tie-breaker: larger id (newer)
-    return sorted(artifacts, key=lambda a: (score(a), a.get("id", 0)), reverse=True)
+# === SCANOSS-style run listing & picking (added to mirror scanoss.py) ===
+def list_workflow_runs(per_page=30):
+    """List runs for this workflow on the fixed branch, workflow_dispatch only."""
+    url = f"{API_BASE}/actions/workflows/{WORKFLOW_FILE}/runs"
+    return api_get(url, params={"per_page": per_page, "event": "workflow_dispatch", "branch": BRANCH})
 
-# NEW: tokened artifact fetch (avoids 403 when clicking raw URL)
-def fetch_artifact_zip(artifact_id: int) -> bytes | None:
-    """
-    Download artifact ZIP via API using the Authorization header.
-    Requires PAT with Actions: Read (fine-grained) or a classic PAT with repo scope.
-    """
-    url = f"{API_BASE}/actions/artifacts/{artifact_id}/zip"
-    r = api_get(url)  # requests follows redirects; headers are included
-    if r.status_code == 200:
-        return r.content
-    st.error(f"Artifact download failed: {r.status_code} {r.text}")
-    return None
+def find_run_by_tag(runs: list, tag: str):
+    """Pick the run whose display_title/name contains the tag; else newest."""
+    for r in runs:
+        title = r.get("display_title") or r.get("name") or ""
+        if tag and tag in title:
+            return r
+    return runs[0] if runs else None
 
-def upload_blob_to_repo(bytes_data: bytes, filename: str) -> str:
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    path = f"uploads/{ts}/{filename}"
-    url = f"{API_BASE}/contents/{path}"
-    payload = {
-        "message": f"Add upload asset {filename}",
-        "content": base64.b64encode(bytes_data).decode("utf-8"),
-        "branch": BRANCH,
-    }
-    r = api_put(url, payload)
-    if r.status_code not in (200, 201):
-        raise RuntimeError(f"Upload failed: {r.status_code} {r.text}")
-    return r.json().get("content", {}).get("download_url", "")
+def download_artifact_zip(artifact_id: int) -> bytes:
+    """Direct artifact ZIP fetch (authorized) like scanoss.py."""
+    r = api_get(f"{API_BASE}/actions/artifacts/{artifact_id}/zip", stream=True)
+    if not r.ok:
+        return b""
+    return r.content
 
 # =========================
 # MAIN FORM (NO SIDEBAR)
@@ -319,95 +304,68 @@ if run_clicked:
             st.error(f"Dispatch failed: {r.status_code} {r.text}")
 
 # =========================
-# STATUS & ARTIFACTS
+# RESULTS (SCANOSS-style)
 # =========================
-st.subheader("3) Status & Results")
+st.markdown("---")
+st.header("📦 Results")
 
-if "dispatch_time" in st.session_state:
-    since = st.session_state["dispatch_time"]
-    col_stat, col_ctrl = st.columns([3,1])
-    with col_ctrl:
-        auto = st.toggle("Auto-refresh", value=False, help="Refresh status every ~5s")
-    if auto:
-        st.query_params["_"] = str(int(time.time()))
+res_c1, res_c2 = st.columns([3, 1])
+with res_c1:
+    # Default the run tag to the predicted filename tag for convenience
+    result_tag = st.text_input("Run tag to check", value=pred)
+with res_c2:
+    check = st.button("🔎 Check status & fetch", use_container_width=True)
 
-    with st.spinner("Fetching latest run..."):
-        run = find_recent_run(WORKFLOW_FILE, since)
-
-    if not run:
-        st.warning("No run found yet. It may take a few seconds to appear.")
+if check:
+    if not result_tag:
+        st.error("Provide a run tag.")
     else:
-        run_id = run.get("id")
-        html_url = run.get("html_url")
-        status = run.get("status")
-        conclusion = run.get("conclusion")
-        created_at = run.get("created_at")
-        updated_at = run.get("updated_at")
-
-        with col_stat:
-            st.markdown(f"**Run:** [{html_url}]({html_url})")
-            st.write(f"**Status:** {status}  |  **Conclusion:** {conclusion or '—'}")
-            st.caption(f"Created: {created_at}  |  Updated: {updated_at}")
-
-        # Artifacts (tokened downloads)
-        art_resp = get_run_artifacts(run_id)
-        if art_resp.status_code == 200:
-            artifacts = art_resp.json().get("artifacts", [])
-            if not artifacts:
-                st.info("No artifacts yet. They appear after the job finishes the 'Upload Artifact' step.")
+        runs_resp = list_workflow_runs(per_page=50)
+        if not runs_resp.ok:
+            st.error(f"Failed to list runs: {runs_resp.status_code} {runs_resp.text}")
+        else:
+            runs = runs_resp.json().get("workflow_runs", [])
+            run = find_run_by_tag(runs, result_tag)
+            if not run:
+                st.warning("No run found yet for this tag. Try again shortly.")
             else:
-                # 👉 Prefer artifact with predicted tag in the name (SCANOSS-like behavior)
-                artifacts = sort_artifacts_scanoss_style(artifacts, pred)
-
-                st.markdown("### 📦 Artifacts")
-                for a in artifacts:
-                    name = a.get("name")
-                    size_in_bytes = a.get("size_in_bytes")
-                    expired = a.get("expired")
-                    artifact_id = a.get("id")
-
-                    match_badge = "  ✅ (tag match)" if (pred and pred.lower() in (name or "").lower()) else ""
-                    st.write(f"• **{name}** — {size_in_bytes} bytes | Expired: {expired}{match_badge}")
-
-                    fetch_key = f"fetch_{artifact_id}"
-                    buf_key = f"artifact_bytes_{artifact_id}"
-
-                    if st.button("Fetch", key=fetch_key):
-                        with st.spinner("Downloading artifact..."):
-                            content = fetch_artifact_zip(artifact_id)
-                        if content:
-                            st.session_state[buf_key] = content
-                            st.success("Ready to download")
-
-                    if buf_key in st.session_state:
-                        st.download_button(
-                            "Download ZIP",
-                            data=st.session_state[buf_key],
-                            file_name=f"{name}.zip",
-                            mime="application/zip",
-                            key=f"dl_{artifact_id}"
-                        )
-        else:
-            st.error(f"Failed to list artifacts: {art_resp.status_code} {art_resp.text}")
-
-        # Recent runs table
-        st.markdown("#### Recent runs for this workflow")
-        r2 = api_get(f"{API_BASE}/actions/workflows/{WORKFLOW_FILE}/runs", params={"per_page": 10})
-        if r2.status_code == 200:
-            data = r2.json().get("workflow_runs", [])
-            rows = []
-            for rr in data:
-                rows.append({
-                    "id": rr.get("id"),
-                    "event": rr.get("event"),
-                    "status": rr.get("status"),
-                    "conclusion": rr.get("conclusion"),
-                    "created_at": rr.get("created_at"),
-                    "run_url": rr.get("html_url"),
-                })
-            st.dataframe(rows, use_container_width=True)
-        else:
-            st.error(f"Could not fetch recent runs: {r2.status_code}")
+                run_id = run["id"]
+                status = run.get("status")
+                conclusion = run.get("conclusion")
+                started = run.get("run_started_at")
+                html_url = run.get("html_url")
+                st.write(f"**Run:** [{run_id}]({html_url})")
+                st.write(f"**Status:** {status}  |  **Conclusion:** {conclusion or '—'}  |  **Started:** {started or '—'}")
+                if status != "completed":
+                    st.info("⏳ Still running (queued/in_progress). Check again in a bit.")
+                else:
+                    if conclusion and conclusion != "success":
+                        st.error("❌ Completed with non-success conclusion.")
+                    arts_resp = get_run_artifacts(run_id)
+                    if not arts_resp.ok:
+                        st.error(f"Failed to list artifacts: {arts_resp.status_code} {arts_resp.text}")
+                    else:
+                        artifacts = arts_resp.json().get("artifacts", [])
+                        if not artifacts:
+                            st.warning("No artifacts found for this run.")
+                        else:
+                            # Prefer artifact with tag in name; else the first
+                            art = None
+                            for a in artifacts:
+                                if result_tag.lower() in (a.get("name","").lower()):
+                                    art = a; break
+                            if not art:
+                                art = artifacts[0]
+                            st.write(f"**Artifact:** `{art.get('name')}`  •  size ~ {art.get('size_in_bytes', 0)} bytes")
+                            if not art.get("expired", False):
+                                data = download_artifact_zip(art["id"])
+                                if data:
+                                    fname = f"{art.get('name','fossology-results')}.zip"
+                                    st.download_button("⬇️ Download ZIP", data=data, file_name=fname, mime="application/zip")
+                                else:
+                                    st.error("Failed to download artifact zip (empty response).")
+                            else:
+                                st.error("Artifact expired (per repo retention). Re-run the scan.")
 
 # =========================
 # FOOTER
